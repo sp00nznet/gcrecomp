@@ -1,0 +1,38 @@
+# Build
+build/
+out/
+cmake-build-*/
+*.vcxproj.user
+.vs/
+
+# Compiled
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Game files (never commit these)
+*.iso
+*.gcm
+*.dol
+*.rel
+*.bnr
