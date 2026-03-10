@@ -47,6 +47,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/gx/gx_core.cpp
         src/gx/gx_tev.cpp
         src/gx/gx_texture.cpp
+        src/gx/gx_texobj.cpp
         src/gx/gx_vertex.cpp
         src/gx/gx_matrix.cpp
         src/gx/gx_display_list.cpp

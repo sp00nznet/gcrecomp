@@ -47,4 +47,15 @@ void GXSetProjection(const float mtx[4][4], uint32_t type) {
     memcpy(g_proj_matrix, mtx, 16 * sizeof(float));
 }
 
+/// Retrieve the current model-view and projection matrices.
+/// The model-view matrix is derived from GXLoadPosMtxImm/GXSetCurrentMtx.
+/// The projection matrix is set by GXSetProjection.
+/// Both are needed by the vertex shader constant buffer for vertex
+/// transformation.
+/// Reference: Pureikyubu XF (Transform Unit) register documentation.
+void GXGetMatrices(float model_view[4][4], float projection[4][4]) {
+    memcpy(model_view, g_pos_matrix, 16 * sizeof(float));
+    memcpy(projection, g_proj_matrix, 16 * sizeof(float));
+}
+
 } // namespace gcrecomp::gx

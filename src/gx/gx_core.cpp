@@ -50,6 +50,17 @@ void GXState::reset() {
     for (int i = 0; i < 4; i++) {
         konst[i][0] = konst[i][1] = konst[i][2] = konst[i][3] = 1.0f;
     }
+
+    // Default material colors to white, ambient to black
+    for (int i = 0; i < 2; i++) {
+        mat_color[i][0] = mat_color[i][1] = mat_color[i][2] = mat_color[i][3] = 1.0f;
+        // amb_color already zeroed by memset
+    }
+
+    // Framebuffer writes enabled by default
+    color_update = true;
+    alpha_update = true;
+    dither = true;
 }
 
 /// Initialize the GX graphics subsystem.
@@ -166,22 +177,33 @@ void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale 
 /// Begin submitting vertices for a primitive.
 /// After calling GXBegin, the game code writes vertex attributes into the
 /// FIFO until num_verts vertices have been submitted, then calls GXEnd.
+/// Forwards to the vertex assembly module to initialize the vertex buffer.
+/// Reference: libogc GXBegin.
 void GXBegin(GXPrimitive prim, uint32_t vtx_fmt, uint32_t num_verts) {
-    // Begin primitive assembly
-    // TODO: forward to D3D11 backend
+    vtx_begin(prim, vtx_fmt, num_verts);
 }
 
 /// End vertex submission and flush the current primitive batch to the GPU.
+/// Forwards to the vertex assembly module to finalize the vertex buffer,
+/// then the D3D11 backend can consume it for drawing.
+/// Reference: libogc GXEnd.
 void GXEnd() {
-    // End primitive assembly and flush to GPU
-    // TODO: forward to D3D11 backend
+    vtx_end();
+
+    // Dispatch the assembled vertex buffer to the D3D11 backend
+    const float* vb_data = get_vertex_buffer_data();
+    uint32_t vb_count = get_vertex_buffer_count();
+    if (vb_data && vb_count > 0) {
+        GXDrawPrimitive((uint32_t)get_current_primitive(), vb_data, vb_count, 30);
+    }
 }
 
 /// Set the vertex attribute format for a given format index.
 /// Defines how vertex data is interpreted (component type, count, and
-/// fixed-point fraction bits).
+/// fixed-point fraction bits). Forwards to the vertex assembly module.
+/// Reference: libogc GXSetVtxAttrFmt.
 void GXSetVtxAttrFmt(uint32_t fmt, GXAttr attr, uint32_t comp_type, uint32_t comp_size, uint32_t frac) {
-    // TODO: track vertex attribute formats
+    vtx_set_attr_fmt(fmt, attr, comp_type, comp_size, frac);
 }
 
 /// Clear all vertex attribute descriptors, setting all to GX_NONE.
@@ -200,12 +222,19 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
     }
 }
 
+/// Return a const reference to the current GX state.
+/// Used by the D3D11 backend to read TEV configuration, blend modes,
+/// depth settings, and other pipeline state when issuing draw calls.
+const GXState& GXGetState() {
+    return g_state;
+}
+
 /// Copy the Embedded Frame Buffer to an External Frame Buffer.
 /// On real hardware this triggers a copy from EFB to XFB in main memory.
 /// In our implementation this maps to presenting the D3D11 render target.
+/// Reference: libogc GXCopyDisp; Pureikyubu EFB-to-XFB copy documentation.
 void GXCopyDisp(void* dest, bool clear) {
-    // Copy framebuffer to XFB
-    // TODO: forward to D3D11 present
+    GXPresent();
 }
 
 /// Set the clear color and depth for the next GXCopyDisp with clear=true.
@@ -346,6 +375,96 @@ void GXSetNumTexGens(uint32_t count) {
 /// Color channels apply lighting computations to produce rasterized colors.
 void GXSetNumChans(uint32_t count) {
     g_state.num_color_chans = count;
+}
+
+// ---- Texture Coordinate Generation ----
+
+/// Configure a texture coordinate generator.
+/// @param coord Tex coord index (GX_TEXCOORD0..7)
+/// @param type Generation type: 0=MTX3x4, 1=MTX2x4, 2=BUMP, 10=SRTG
+/// @param src Source parameter: 0=POS, 1=NRM, 4+=TEX0-7
+/// @param mtx XF matrix index (30,33,...,57 or 0x3C=identity)
+/// Reference: libogc GXSetTexCoordGen; Pureikyubu XF documentation.
+void GXSetTexCoordGen(uint32_t coord, uint32_t type, uint32_t src, uint32_t mtx) {
+    if (coord >= 8) return;
+    g_state.tex_gens[coord].type      = type;
+    g_state.tex_gens[coord].src_param = src;
+    g_state.tex_gens[coord].mtx       = mtx;
+}
+
+// ---- Color Channel Control ----
+
+/// Configure a color channel's lighting parameters.
+/// @param chan Channel index: 0=COLOR0, 1=ALPHA0, 2=COLOR1, 3=ALPHA1
+/// @param enable Enable lighting for this channel
+/// @param amb_src Ambient source: 0=register, 1=vertex color
+/// @param mat_src Material source: 0=register, 1=vertex color
+/// @param light_mask Bitmask of active lights (bits 0-7)
+/// @param diff_fn Diffuse function: 0=none, 1=signed, 2=clamped
+/// @param attn_fn Attenuation function: 0=specular, 1=spotlight, 2=none
+/// Reference: libogc GXSetChanCtrl; Pureikyubu XF lighting registers.
+void GXSetChanCtrl(uint32_t chan, bool enable, uint32_t amb_src, uint32_t mat_src,
+                   uint32_t light_mask, uint32_t diff_fn, uint32_t attn_fn) {
+    if (chan >= 4) return;
+    g_state.chan_ctrl[chan].enable     = enable;
+    g_state.chan_ctrl[chan].amb_src    = amb_src;
+    g_state.chan_ctrl[chan].mat_src    = mat_src;
+    g_state.chan_ctrl[chan].light_mask = light_mask;
+    g_state.chan_ctrl[chan].diff_fn    = diff_fn;
+    g_state.chan_ctrl[chan].attn_fn    = attn_fn;
+}
+
+/// Set the material color register for a color channel.
+/// @param chan Channel index (0 or 1)
+/// @param color Packed RGBA8 color
+void GXSetChanMatColor(uint32_t chan, uint32_t color) {
+    if (chan >= 2) return;
+    g_state.mat_color[chan][0] = ((color >> 24) & 0xFF) / 255.0f;
+    g_state.mat_color[chan][1] = ((color >> 16) & 0xFF) / 255.0f;
+    g_state.mat_color[chan][2] = ((color >>  8) & 0xFF) / 255.0f;
+    g_state.mat_color[chan][3] = ((color >>  0) & 0xFF) / 255.0f;
+}
+
+/// Set the ambient color register for a color channel.
+/// @param chan Channel index (0 or 1)
+/// @param color Packed RGBA8 color
+void GXSetChanAmbColor(uint32_t chan, uint32_t color) {
+    if (chan >= 2) return;
+    g_state.amb_color[chan][0] = ((color >> 24) & 0xFF) / 255.0f;
+    g_state.amb_color[chan][1] = ((color >> 16) & 0xFF) / 255.0f;
+    g_state.amb_color[chan][2] = ((color >>  8) & 0xFF) / 255.0f;
+    g_state.amb_color[chan][3] = ((color >>  0) & 0xFF) / 255.0f;
+}
+
+// ---- Vertex Arrays ----
+
+/// Set a vertex array base pointer and stride for indexed vertex access.
+/// @param attr Attribute type (GX_VA_POS, GX_VA_NRM, GX_VA_CLR0, etc.)
+/// @param base Base address of the array data
+/// @param stride Stride in bytes between elements
+/// Reference: libogc GXSetArray; Pureikyubu CP register documentation.
+void GXSetArray(GXAttr attr, const void* base, uint32_t stride) {
+    uint32_t idx = static_cast<uint32_t>(attr);
+    if (idx >= GX_VA_MAX_ATTR) return;
+    g_state.vtx_arrays[idx].base   = static_cast<const uint8_t*>(base);
+    g_state.vtx_arrays[idx].stride = stride;
+}
+
+// ---- Framebuffer Write Masks ----
+
+/// Enable or disable color writes to the framebuffer.
+void GXSetColorUpdate(bool enable) {
+    g_state.color_update = enable;
+}
+
+/// Enable or disable alpha writes to the framebuffer.
+void GXSetAlphaUpdate(bool enable) {
+    g_state.alpha_update = enable;
+}
+
+/// Enable or disable dithering.
+void GXSetDither(bool enable) {
+    g_state.dither = enable;
 }
 
 } // namespace gcrecomp::gx

@@ -106,4 +106,10 @@ void audio_set_pan(int voice_id, float pan);
 /// Set the playback pitch/speed of a playing voice.
 void audio_set_pitch(int voice_id, float pitch);
 
+/// Mix all active voices into separate L/R float buffers (called by the audio system).
+/// @param output_l Left channel output buffer (frame_count floats, zeroed then summed into)
+/// @param output_r Right channel output buffer (frame_count floats, zeroed then summed into)
+/// @param frame_count Number of sample frames to mix
+void mix_voices(float* output_l, float* output_r, uint32_t frame_count);
+
 } // namespace gcrecomp::audio

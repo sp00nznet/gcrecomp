@@ -398,6 +398,44 @@ struct GXState {
     // Number of active color channels (0-2)
     uint32_t         num_color_chans;
 
+    // Texture coordinate generation config (8 generators)
+    // Reference: libogc GXSetTexCoordGen; Pureikyubu XF documentation
+    struct TexGenConfig {
+        uint32_t type;       ///< 0=MTX3x4, 1=MTX2x4, 2=BUMP0-7, 10=SRTG
+        uint32_t src_param;  ///< 0=POS, 1=NRM, 4+=TEX0-7
+        uint32_t mtx;        ///< XF matrix index (30,33,36,...,57 or 0x3C=identity)
+    };
+    TexGenConfig     tex_gens[8];
+
+    // Color channel control (COLOR0, ALPHA0, COLOR1, ALPHA1)
+    // Reference: libogc GXSetChanCtrl; Pureikyubu XF lighting registers
+    struct ChanCtrl {
+        bool     enable;      ///< Lighting enable
+        uint32_t amb_src;     ///< 0=register, 1=vertex
+        uint32_t mat_src;     ///< 0=register, 1=vertex
+        uint32_t light_mask;  ///< Bitmask of active lights (bits 0-7)
+        uint32_t diff_fn;     ///< 0=none, 1=signed, 2=clamped
+        uint32_t attn_fn;     ///< 0=specular, 1=spotlight, 2=none
+    };
+    ChanCtrl         chan_ctrl[4];
+
+    // Material and ambient color registers
+    float            mat_color[2][4];   ///< Material colors [channel][RGBA]
+    float            amb_color[2][4];   ///< Ambient colors [channel][RGBA]
+
+    // Vertex array base pointers and strides (for indexed vertex access)
+    // Reference: libogc GXSetArray; Pureikyubu CP register documentation
+    struct VtxArray {
+        const uint8_t* base;  ///< Base address of array data
+        uint32_t stride;      ///< Stride in bytes between elements
+    };
+    VtxArray         vtx_arrays[GX_VA_MAX_ATTR];
+
+    // Framebuffer write masks
+    bool             color_update;  ///< Enable color writes to framebuffer
+    bool             alpha_update;  ///< Enable alpha writes to framebuffer
+    bool             dither;        ///< Enable dithering
+
     /// Reset all state to hardware defaults.
     void reset();
 };
@@ -462,6 +500,81 @@ void GXBegin(GXPrimitive prim, uint32_t vtx_fmt, uint32_t num_verts);
 /// End vertex submission (flushes the current primitive batch).
 void GXEnd();
 
+// =============================================================================
+// Vertex FIFO Data Write Functions
+//
+// Called between GXBegin and GXEnd to supply per-vertex attribute data.
+// Games write attributes in order: position, normal, color, texcoords.
+// Texture coordinates are written sequentially for each active tex gen.
+//
+// Reference: libogc GXPosition*, GXNormal*, GXColor*, GXTexCoord* functions.
+// =============================================================================
+
+/// Write a 3-component float position (x, y, z).
+void GXPosition3f32(float x, float y, float z);
+
+/// Write a 2-component float position (x, y), z = 0.
+void GXPosition2f32(float x, float y);
+
+/// Write a 3-component signed 16-bit position (scaled by VAT frac bits).
+void GXPosition3s16(int16_t x, int16_t y, int16_t z);
+
+/// Write a 3-component float normal vector (nx, ny, nz).
+void GXNormal3f32(float nx, float ny, float nz);
+
+/// Write a 4-component u8 color (r, g, b, a) to color channel 0.
+void GXColor4u8(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+
+/// Write a packed 32-bit RGBA color to color channel 0.
+void GXColor1u32(uint32_t clr);
+
+/// Write a 2-component float texture coordinate (s, t) to the next tex coord slot.
+void GXTexCoord2f32(float s, float t);
+
+/// Write a 2-component signed 16-bit texture coordinate (scaled by VAT frac bits).
+void GXTexCoord2s16(int16_t s, int16_t t);
+
+/// Write an 8-bit indexed texture coordinate to the next tex coord slot.
+void GXTexCoord1x8(uint8_t idx);
+
+/// Explicitly submit the current vertex to the vertex buffer.
+void GXSubmitVertex();
+
+/// Write an 8-bit value to the GX FIFO (for matrix indices, etc.).
+void GX1x8(uint8_t val);
+
+/// Write a 16-bit value to the GX FIFO.
+void GX1x16(uint16_t val);
+
+/// Write a 32-bit value to the GX FIFO.
+void GX1x32(uint32_t val);
+
+// =============================================================================
+// Vertex Assembly Internal Interface
+//
+// These functions are called by gx_core.cpp to wire the public GX API to the
+// vertex assembly module in gx_vertex.cpp. They are also used by the D3D11
+// backend to read the assembled vertex buffer for drawing.
+// =============================================================================
+
+/// Begin vertex assembly for a new primitive. Called from GXBegin.
+void vtx_begin(GXPrimitive prim, uint32_t vtx_fmt, uint32_t num_verts);
+
+/// End vertex assembly and finalize the vertex buffer. Called from GXEnd.
+void vtx_end();
+
+/// Set a vertex attribute format entry in the VAT. Called from GXSetVtxAttrFmt.
+void vtx_set_attr_fmt(uint32_t fmt, GXAttr attr, uint32_t comp_type, uint32_t comp_size, uint32_t frac);
+
+/// Get the assembled vertex buffer data pointer (30 floats per vertex).
+const float* get_vertex_buffer_data();
+
+/// Get the number of vertices in the assembled buffer.
+uint32_t get_vertex_buffer_count();
+
+/// Get the primitive type of the last assembled draw call.
+GXPrimitive get_current_primitive();
+
 /// Set vertex attribute format for a given format index.
 void GXSetVtxAttrFmt(uint32_t fmt, GXAttr attr, uint32_t comp_type, uint32_t comp_size, uint32_t frac);
 
@@ -523,6 +636,45 @@ void GXSetNumTexGens(uint32_t count);
 /// Set the number of active color channels (0-2).
 void GXSetNumChans(uint32_t count);
 
+/// Configure texture coordinate generation for a tex coord slot.
+/// @param coord Texture coordinate index (0-7)
+/// @param type Generation function (0=MTX3x4, 1=MTX2x4, 2=BUMP, 10=SRTG)
+/// @param src Source parameter (0=POS, 1=NRM, 4+=TEX0-7)
+/// @param mtx Matrix index in XF memory
+void GXSetTexCoordGen(uint32_t coord, uint32_t type, uint32_t src, uint32_t mtx);
+
+/// Configure a color channel's lighting and material source.
+/// @param chan Channel (0=COLOR0, 1=ALPHA0, 2=COLOR1, 3=ALPHA1)
+/// @param enable Whether lighting is enabled
+/// @param amb_src Ambient source (0=register, 1=vertex)
+/// @param mat_src Material source (0=register, 1=vertex)
+/// @param light_mask Bitmask of lights affecting this channel
+/// @param diff_fn Diffuse function (0=none, 1=signed, 2=clamped)
+/// @param attn_fn Attenuation function (0=specular, 1=spotlight, 2=none)
+void GXSetChanCtrl(uint32_t chan, bool enable, uint32_t amb_src, uint32_t mat_src,
+                   uint32_t light_mask, uint32_t diff_fn, uint32_t attn_fn);
+
+/// Set a channel's material color register.
+void GXSetChanMatColor(uint32_t chan, uint32_t color);
+
+/// Set a channel's ambient color register.
+void GXSetChanAmbColor(uint32_t chan, uint32_t color);
+
+/// Set the base address and stride for an indexed vertex attribute array.
+/// @param attr Vertex attribute (e.g., GX_VA_POS, GX_VA_CLR0)
+/// @param base Pointer to the array data
+/// @param stride Bytes between consecutive array elements
+void GXSetArray(GXAttr attr, const void* base, uint32_t stride);
+
+/// Enable or disable color writes to the framebuffer.
+void GXSetColorUpdate(bool enable);
+
+/// Enable or disable alpha writes to the framebuffer.
+void GXSetAlphaUpdate(bool enable);
+
+/// Enable or disable dithering.
+void GXSetDither(bool enable);
+
 /// Load a 3x4 position/normal matrix into GX matrix memory.
 /// @param mtx 3x4 matrix data (row-major)
 /// @param id Matrix memory slot (0-9, each slot is 12 floats)
@@ -546,6 +698,85 @@ void GXCallDisplayList(const uint8_t* data, uint32_t size);
 /// Reference: GameCubeRecompiled shader generation approach.
 std::string generate_tev_shader(const GXState& state);
 
+/// Compute a hash of the TEV-related state for shader caching.
+/// Uses FNV-1a over all state fields that affect shader generation.
+/// Reference: GameCubeRecompiled shader caching approach.
+uint64_t hash_tev_state(const GXState& state);
+
+// =============================================================================
+// Texture Object
+//
+// Mirrors GXTexObj from the Nintendo GameCube SDK. Games initialize these
+// via GXInitTexObj/GXInitTexObjCI and then bind them to a texture map slot
+// (0-7) via GXLoadTexObj. The D3D11 backend decodes the tiled texture data
+// and creates a shader resource view for sampling in TEV pixel shaders.
+//
+// Reference: libogc GXTexObj; Pureikyubu texture unit documentation.
+// =============================================================================
+
+struct GXTexObj {
+    const uint8_t* data;     ///< Pointer to texture data in emulated memory
+    uint32_t width;          ///< Texture width in pixels
+    uint32_t height;         ///< Texture height in pixels
+    GXTexFmt format;         ///< Texture data format (tiled/swizzled)
+    uint32_t wrap_s;         ///< S-axis wrap mode: 0=clamp, 1=repeat, 2=mirror
+    uint32_t wrap_t;         ///< T-axis wrap mode: 0=clamp, 1=repeat, 2=mirror
+    bool mipmap;             ///< Whether mipmaps are present
+    uint32_t min_filter;     ///< Min filter: 0=near, 1=linear, 4=near_mip_near, 5=lin_mip_near, 6=near_mip_lin, 7=lin_mip_lin
+    uint32_t mag_filter;     ///< Mag filter: 0=near, 1=linear
+};
+
+// =============================================================================
+// Texture API
+//
+// These functions mirror the Nintendo GX SDK texture management interface.
+// GXInitTexObj fills a GXTexObj struct with texture parameters.
+// GXLoadTexObj decodes the texture and binds it to a map slot for TEV sampling.
+// GXBindTextures is called internally by the draw pipeline to set SRVs.
+//
+// Reference: libogc GXInitTexObj, GXLoadTexObj; Pureikyubu texture unit.
+// =============================================================================
+
+/// Initialize a texture object with format, dimensions, and filtering.
+void GXInitTexObj(GXTexObj* obj, const void* data, uint16_t width, uint16_t height,
+                  GXTexFmt format, uint32_t wrap_s, uint32_t wrap_t, bool mipmap);
+
+/// Initialize a color-indexed (paletted) texture object.
+/// @param tlut TLUT index (not yet implemented, reserved for future use)
+void GXInitTexObjCI(GXTexObj* obj, const void* data, uint16_t width, uint16_t height,
+                    GXTexFmt format, uint32_t wrap_s, uint32_t wrap_t, bool mipmap, uint32_t tlut);
+
+/// Decode and load a texture into a map slot (0-7) for TEV sampling.
+/// Creates a D3D11 Texture2D + SRV if not already cached.
+void GXLoadTexObj(const GXTexObj* obj, uint32_t map_id);
+
+/// Set the minification filter on a texture object.
+void GXSetTexObjMinFilt(GXTexObj* obj, uint32_t filter);
+
+/// Set the magnification filter on a texture object.
+void GXSetTexObjMagFilt(GXTexObj* obj, uint32_t filter);
+
+/// Invalidate all cached textures, forcing re-decode on next load.
+void GXInvalidateTexAll();
+
+/// Bind all loaded texture map SRVs and samplers to the pixel shader.
+/// Called internally by GXDrawPrimitive before issuing draw calls.
+void GXBindTextures();
+
+// =============================================================================
+// D3D11 Device Access
+//
+// Provides access to the D3D11 device and context from other modules
+// (e.g., texture creation in gx_texobj.cpp). Returns void* to avoid
+// requiring d3d11.h in the public header.
+// =============================================================================
+
+/// Get the D3D11 device (returns ID3D11Device* cast to void*).
+void* GXGetD3D11Device();
+
+/// Get the D3D11 immediate context (returns ID3D11DeviceContext* cast to void*).
+void* GXGetD3D11Context();
+
 /// Initialize the D3D11 rendering backend.
 /// @param hwnd Window handle (nullptr to create a new window)
 /// @param width Window width in pixels
@@ -557,5 +788,52 @@ void GXShutdownBackend();
 
 /// Present the rendered frame (swap buffers).
 void GXPresent();
+
+/// Draw assembled vertex data using the current GX pipeline state.
+/// Compiles/caches the TEV pixel shader, sets up all D3D11 pipeline state
+/// (blend, depth-stencil, rasterizer, viewport, scissor), fills constant
+/// buffers with matrices and TEV parameters, and issues the draw call.
+///
+/// @param primitive_type GX primitive type (GX_TRIANGLES, GX_QUADS, etc.)
+/// @param vertex_data Pointer to assembled vertex floats (30 floats per vertex)
+/// @param num_vertices Number of vertices in the vertex_data array
+/// @param floats_per_vertex Number of floats per vertex (expected: 30)
+///
+/// Reference: libogc GXBegin/GXEnd vertex submission pipeline.
+void GXDrawPrimitive(uint32_t primitive_type, const float* vertex_data, uint32_t num_vertices, uint32_t floats_per_vertex);
+
+/// Return a const reference to the current GX state.
+/// Used by the D3D11 backend to read TEV configuration, blend modes,
+/// depth settings, and other pipeline state when issuing draw calls.
+const GXState& GXGetState();
+
+/// Retrieve the current model-view and projection matrices.
+/// These are set by GXLoadPosMtxImm/GXSetCurrentMtx/GXSetProjection and
+/// are needed by the vertex shader constant buffer.
+/// @param model_view Output 4x4 model-view matrix (row-major)
+/// @param projection Output 4x4 projection matrix (row-major)
+void GXGetMatrices(float model_view[4][4], float projection[4][4]);
+
+/// Initialize the D3D11 shader subsystem (compile vertex shader, create input layout).
+/// Called once during GXInitBackend.
+/// @param device The D3D11 device (ID3D11Device* cast to void*)
+/// @return true on success
+bool GXInitShaders(void* device);
+
+/// Shut down the D3D11 shader subsystem and release all cached shaders.
+void GXShutdownShaders();
+
+/// Get or compile a TEV pixel shader for the given GX state.
+/// Looks up the shader cache by TEV state hash; compiles on cache miss.
+/// @param state Current GX state (TEV configuration determines the shader)
+/// @param device D3D11 device (ID3D11Device* cast to void*)
+/// @return Compiled pixel shader (ID3D11PixelShader* cast to void*), or nullptr on failure
+void* GXGetOrCompileTevShader(const GXState& state, void* device);
+
+/// Get the compiled vertex shader (ID3D11VertexShader* cast to void*).
+void* GXGetVertexShader();
+
+/// Get the vertex input layout (ID3D11InputLayout* cast to void*).
+void* GXGetInputLayout();
 
 } // namespace gcrecomp::gx
