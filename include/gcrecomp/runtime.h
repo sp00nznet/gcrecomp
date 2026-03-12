@@ -195,9 +195,13 @@ struct Memory {
     static constexpr uint32_t MAIN_RAM_BASE  = 0x80000000;        // Cached base
     static constexpr uint32_t MAIN_RAM_END   = MAIN_RAM_BASE + MAIN_RAM_SIZE;
     static constexpr uint32_t UNCACHED_BASE  = 0xC0000000;        // Uncached mirror
+    static constexpr uint32_t HW_REG_BASE   = 0xCC000000;        // Hardware registers
+    static constexpr uint32_t HW_REG_SIZE   = 0x00010000;        // 64 KB of HW regs
 
     // Host-side backing buffer for the 24 MB emulated RAM
     uint8_t* ram = nullptr;
+    // Hardware register space (absorbs reads/writes to 0xCC000000-0xCC00FFFF)
+    uint8_t hw_regs[HW_REG_SIZE] = {};
 
     // Allocate the backing buffer. Returns false on failure.
     bool init();

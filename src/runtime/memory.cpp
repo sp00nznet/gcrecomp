@@ -53,8 +53,20 @@ uint8_t* Memory::translate(uint32_t addr) {
     if (addr >= UNCACHED_BASE && addr < UNCACHED_BASE + MAIN_RAM_SIZE) {
         return ram + (addr - UNCACHED_BASE);
     }
-    // Out of range
-    fprintf(stderr, "[Memory] Bad address: 0x%08X\n", addr);
+    // Physical address: 0x00000000 - 0x017FFFFF (some init code uses physical addrs)
+    if (addr < MAIN_RAM_SIZE) {
+        return ram + addr;
+    }
+    // Hardware registers: 0xCC000000 - 0xCC00FFFF
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        return hw_regs + (addr - HW_REG_BASE);
+    }
+    // Out of range - rate-limit warnings
+    static int bad_count = 0;
+    bad_count++;
+    if (bad_count <= 20 || (bad_count % 10000 == 0)) {
+        fprintf(stderr, "[Memory] Bad address: 0x%08X (occurrence #%d)\n", addr, bad_count);
+    }
     return ram; // Don't crash, return base (will produce wrong results but won't segfault)
 }
 
@@ -96,6 +108,48 @@ double Memory::readf64(uint32_t addr) const {
     return d;
 }
 
+// ---- Hardware Register HLE ----
+// When the game writes to certain HW registers, we need to simulate
+// the hardware's response. Otherwise the game busy-waits forever.
+
+// EXI (External Interface) registers - 3 channels, 0x14 bytes each
+// Channel 0: 0xCC006800, Channel 1: 0xCC006814, Channel 2: 0xCC006828
+static constexpr uint32_t EXI_BASE = 0xCC006800;
+static constexpr uint32_t EXI_CH_SIZE = 0x14;
+// Offsets within each channel:
+//   +0x00 = CSR (Channel Status)
+//   +0x04 = MAR (DMA Memory Address)
+//   +0x08 = LENGTH (DMA Transfer Length)
+//   +0x0C = CR (Control Register) — bit 0 = TSTART
+//   +0x10 = DATA (Immediate data)
+
+static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
+    // EXI DMA Control Register: when TSTART (bit 0) is set, immediately
+    // complete the transfer by clearing it. On real hardware the EXI
+    // controller does the DMA and clears TSTART when done.
+    for (int ch = 0; ch < 3; ch++) {
+        uint32_t cr_addr = EXI_BASE + ch * EXI_CH_SIZE + 0x0C;
+        if (addr == cr_addr && (val & 1)) {
+            val &= ~1u; // Clear TSTART — transfer "complete"
+            break;
+        }
+    }
+
+    // PI (Processor Interface) Interrupt Cause: 0xCC003000
+    // Writing 1 bits clears them (write-to-clear register)
+    if (addr == 0xCC003000) {
+        uint32_t old = mem->read32(addr);
+        val = old & ~val; // Clear the bits that were written as 1
+    }
+
+    // Store the value
+    uint8_t* p = mem->hw_regs + (addr - Memory::HW_REG_BASE);
+    p[0] = (uint8_t)(val >> 24);
+    p[1] = (uint8_t)(val >> 16);
+    p[2] = (uint8_t)(val >> 8);
+    p[3] = (uint8_t)val;
+}
+
 // Big-endian writes
 void Memory::write8(uint32_t addr, uint8_t val) {
     *translate(addr) = val;
@@ -108,6 +162,11 @@ void Memory::write16(uint32_t addr, uint16_t val) {
 }
 
 void Memory::write32(uint32_t addr, uint32_t val) {
+    // Intercept HW register writes for HLE
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        hw_write32_hle(this, addr, val);
+        return;
+    }
     uint8_t* p = translate(addr);
     p[0] = (uint8_t)(val >> 24);
     p[1] = (uint8_t)(val >> 16);

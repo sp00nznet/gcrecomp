@@ -37,12 +37,35 @@ RecompiledFunc FuncTable::lookup(uint32_t gc_addr) const {
 }
 
 void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
+    if (gc_addr == 0) return; // Null function pointer — skip silently
+
+    // Quick range check: valid code is in 0x80003100 - 0x80340000 (DOL text+data).
+    // Addresses outside this range are garbage from uninitialized vtables/data.
+    // Note: some function pointers point into data sections (0x80338680+) for
+    // trampolines, so we use a generous upper bound.
+    if (gc_addr < 0x80003100 || gc_addr >= 0x80400000 || (gc_addr & 3) != 0) {
+        return; // Not a valid code address — skip silently
+    }
+
     RecompiledFunc func = lookup(gc_addr);
     if (func) {
         func(ctx, mem);
     } else {
-        fprintf(stderr, "[FuncTable] Unresolved indirect call to 0x%08X\n", gc_addr);
-        fprintf(stderr, "  LR=0x%08X  r3=0x%08X  r4=0x%08X\n", ctx->lr, ctx->r[3], ctx->r[4]);
+        // Rate-limit unresolved call warnings
+        static int unresolved_count = 0;
+        static std::unordered_map<uint32_t, int> seen;
+        unresolved_count++;
+        int& addr_count = seen[gc_addr];
+        addr_count++;
+        if (addr_count <= 1) {
+            fprintf(stderr, "[FuncTable] Unresolved call to 0x%08X (LR=0x%08X)\n",
+                    gc_addr, ctx->lr);
+        }
+        if (unresolved_count == 100 || unresolved_count == 1000 ||
+            (unresolved_count % 10000 == 0)) {
+            fprintf(stderr, "[FuncTable] %d total unresolved calls (%zu unique addresses)\n",
+                    unresolved_count, seen.size());
+        }
     }
 }
 
