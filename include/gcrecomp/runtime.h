@@ -302,4 +302,18 @@ RecompiledFunc lookup_os_func(const char* name);
 // directory on the host filesystem.
 void set_game_root(const std::string& path);
 
+// Mount a GameCube ISO disc image. Parses the disc header, loads the FST
+// (File System Table) into emulated memory, and enables DVD reads directly
+// from the ISO file. The FST is placed at the top of emulated RAM and
+// OS_FST_ADDR (0x80000038) is set to point to it.
+// Returns true on success, false if the ISO can't be opened or parsed.
+bool mount_disc_image(const char* iso_path, Memory* mem);
+
+// Read raw data from the mounted disc image at a given byte offset.
+// Used internally by DVD HLE functions. Returns bytes read (0 on failure).
+size_t disc_read(uint32_t disc_offset, void* dst, size_t length);
+
+// Check if a disc image is currently mounted.
+bool is_disc_mounted();
+
 } // namespace gcrecomp

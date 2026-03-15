@@ -685,6 +685,94 @@ static void dvd_read_async(PPCContext* ctx, Memory* mem) {
 }
 
 // =============================================================================
+// Disc Image (ISO) Support
+//
+// Mounts a GameCube disc image and loads the FST into emulated memory.
+// Once mounted, disc_read() can serve raw data from any offset.
+// =============================================================================
+
+static FILE* g_disc_image = nullptr;
+static uint32_t g_fst_ram_addr = 0;
+
+bool mount_disc_image(const char* iso_path, Memory* mem) {
+    if (g_disc_image) {
+        fclose(g_disc_image);
+        g_disc_image = nullptr;
+    }
+
+    FILE* fp = fopen(iso_path, "rb");
+    if (!fp) {
+        fprintf(stderr, "[DVD] Failed to open disc image: %s\n", iso_path);
+        return false;
+    }
+
+    // Read disc header (first 0x440 bytes)
+    uint8_t header[0x0440];
+    if (fread(header, 1, sizeof(header), fp) != sizeof(header)) {
+        fprintf(stderr, "[DVD] Failed to read disc header\n");
+        fclose(fp);
+        return false;
+    }
+
+    // Read big-endian 32-bit values from header
+    auto be32 = [](const uint8_t* p) -> uint32_t {
+        return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+    };
+
+    // Game ID (first 6 bytes)
+    char game_id[7] = {};
+    memcpy(game_id, header, 6);
+
+    // FST location
+    uint32_t fst_offset = be32(header + 0x0424);
+    uint32_t fst_size   = be32(header + 0x0428);
+
+    printf("[DVD] Disc image: %s\n", iso_path);
+    printf("[DVD]   Game ID: %s\n", game_id);
+    printf("[DVD]   FST offset: 0x%08X, size: %u bytes\n", fst_offset, fst_size);
+
+    if (fst_size == 0 || fst_size > 0x200000) {  // Sanity: < 2MB
+        fprintf(stderr, "[DVD] Invalid FST size\n");
+        fclose(fp);
+        return false;
+    }
+
+    // Read FST
+    std::vector<uint8_t> fst_data(fst_size);
+    fseek(fp, fst_offset, SEEK_SET);
+    if (fread(fst_data.data(), 1, fst_size, fp) != fst_size) {
+        fprintf(stderr, "[DVD] Failed to read FST\n");
+        fclose(fp);
+        return false;
+    }
+
+    // Place FST near top of emulated RAM (below arena end)
+    g_fst_ram_addr = 0x81600000;
+    uint8_t* fst_dst = mem->translate(g_fst_ram_addr);
+    memcpy(fst_dst, fst_data.data(), fst_size);
+
+    // Set OS low-memory FST pointers
+    mem->write32(hw::OS_FST_ADDR, g_fst_ram_addr);
+    mem->write32(hw::OS_FST_MAX_LEN, fst_size);
+
+    uint32_t num_entries = be32(fst_data.data() + 8);
+    printf("[DVD]   FST loaded at 0x%08X (%u entries)\n", g_fst_ram_addr, num_entries);
+
+    g_disc_image = fp;
+    return true;
+}
+
+size_t disc_read(uint32_t disc_offset, void* dst, size_t length) {
+    if (!g_disc_image || !dst || length == 0) return 0;
+    fseek(g_disc_image, disc_offset, SEEK_SET);
+    return fread(dst, 1, length, g_disc_image);
+}
+
+bool is_disc_mounted() {
+    return g_disc_image != nullptr;
+}
+
+// =============================================================================
 // Thread Management (simplified stubs)
 //
 // Most GameCube games are primarily single-threaded for gameplay logic, with
