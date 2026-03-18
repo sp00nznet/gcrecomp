@@ -161,18 +161,25 @@ typedef void(*RecompiledFunc)(PPCContext* ctx, Memory* mem);
   (0x80000000 cached, 0xC0000000 uncached)
 - **FuncTable**: Maps GameCube addresses to native function pointers for indirect calls
 
-### OS HLE (`src/os/`)
+### OS HLE & Disc Support (`src/os/`)
 
 High-Level Emulation of the Dolphin OS — the system software that every GameCube game
 relies on. Instead of emulating the hardware that runs the OS, we **replace the OS
 functions directly** with native implementations.
+
+Also includes disc image mounting (GCM/ISO), FST parsing, and Nintendo archive format
+support (Yaz0 decompression, RARC parsing) — the building blocks every GameCube game
+needs for asset loading.
 
 | Function Group | What It Does | Status |
 |----------------|-------------|--------|
 | **Timing** | OSGetTime/Tick at 40.5MHz timebase | Done |
 | **Heap** | OSCreateHeap/OSAlloc/OSFree (first-fit w/ coalescing) | Done |
 | **Arena** | OSGet/SetArenaLo/Hi | Done |
-| **DVD** | DVDOpen/Read/Close from extracted game files | Done |
+| **DVD** | DVDOpen/Read/Close from extracted files or mounted ISO | Done |
+| **Disc Image** | mount_disc_image() — FST parsing, raw disc reads | Done |
+| **Yaz0** | Nintendo Yaz0 (SZS) decompression — standard LZ format | Done |
+| **RARC** | RARC archive parser — hierarchical file extraction | Done |
 | **Threads** | OSCreateThread/Resume (minimal for single-threaded games) | Done |
 | **Interrupts** | OSDisable/Enable/RestoreInterrupts (no-ops in recomp) | Done |
 | **Mutex/MsgQueue** | Init/Lock/Unlock stubs | Done |
@@ -251,8 +258,8 @@ Here's the rough roadmap for bringing up a new title:
 2. **Find or create a symbol map** (check if there's a decompilation project for your game!)
 3. **Run the recompiler** to generate C source files
 4. **Link against gcrecomp** runtime libraries
-5. **Test and iterate** — add any game-specific OS function stubs as needed
-6. **Extract game assets** (textures, models, audio) from the ISO
+5. **Mount the disc image** with `mount_disc_image()` for asset loading
+6. **Test and iterate** — add game-specific OS stubs, use Yaz0/RARC for archive loading
 7. **Play your game natively!**
 
 See [docs/BRINGING_UP_A_GAME.md](docs/BRINGING_UP_A_GAME.md) for a detailed walkthrough.

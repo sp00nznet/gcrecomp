@@ -39,6 +39,8 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/runtime/memory.cpp
         src/runtime/func_table.cpp
         src/os/os_funcs.cpp
+        src/os/yaz0.cpp
+        src/os/rarc.cpp
     )
     target_include_directories(gcrecomp_runtime PUBLIC include)
 
