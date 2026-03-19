@@ -90,8 +90,8 @@ struct VSOutput {
 };
 
 cbuffer Matrices : register(b0) {
-    float4x4 model_view;
-    float4x4 projection;
+    row_major float4x4 model_view;
+    row_major float4x4 projection;
 };
 
 VSOutput main(VSInput input) {
