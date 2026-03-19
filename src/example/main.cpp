@@ -38,14 +38,8 @@ static const uint32_t WINDOW_HEIGHT = 720;
 
 static void print_banner() {
     printf("\n");
-    printf("    ____  _____ ____  ___  ___ ___  __  __ ____\n");
-    printf("   / ___||  ___| __ )| __|/ __/ _ \\|  \\/  |  _ \\\n");
-    printf("  | |  _ | |   |  _ \\| _|| (_| | | | |\\/| | |_) |\n");
-    printf("  | |_| || |___| |_) | |___\\__\\_| |_| |  | |  __/\n");
-    printf("   \\____||_____|____/|_____|   \\___/|_|  |_|_|\n");
-    printf("\n");
-    printf("   GameCube Static Recompilation Toolkit\n");
-    printf("   Example Launcher — Subsystem Test\n");
+    printf("  gcrecomp - GameCube Static Recompilation Toolkit\n");
+    printf("  Example Launcher - Subsystem Test\n");
     printf("\n");
 }
 
