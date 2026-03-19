@@ -228,7 +228,7 @@ void GXPresent() {
         g_swap_chain->Present(1, 0); // VSync on
 
         // Clear for next frame
-        float clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        float clear_color[4] = { 0.15f, 0.3f, 0.7f, 1.0f }; // ocean blue
         g_context->ClearRenderTargetView(g_rtv, clear_color);
         g_context->ClearDepthStencilView(g_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
     }
