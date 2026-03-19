@@ -62,10 +62,10 @@ uint8_t* Memory::translate(uint32_t addr) {
         return hw_regs + (addr - HW_REG_BASE);
     }
     // Out of range - rate-limit warnings
-    static int bad_count = 0;
-    bad_count++;
-    if (bad_count <= 10) {
-        fprintf(stderr, "[Memory] Bad address: 0x%08X (occurrence #%d)\n", addr, bad_count);
+    static uint32_t bad_count = 0;
+    if (bad_count < 10) {
+        bad_count++;
+        fprintf(stderr, "[Memory] Bad address: 0x%08X (occurrence #%u)\n", addr, bad_count);
     }
     return ram; // Don't crash, return base (will produce wrong results but won't segfault)
 }
