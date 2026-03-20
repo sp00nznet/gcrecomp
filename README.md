@@ -1,16 +1,5 @@
 # gcrecomp — GameCube Static Recompilation Toolkit
 
-```
-    ____  _____ ____  ___  ___ ___  __  __ ____
-   / ___||  ___| __ )| __|/ __/ _ \|  \/  |  _ \
-  | |  _ | |   |  _ \| _|| (_| | | | |\/| | |_) |
-  | |_| || |___| |_) | |___\__\_| |_| |  | |  __/
-   \____||_____|____/|_____|   \___/|_|  |_|_|
-
-   Bring GameCube games to life on modern hardware.
-   No emulator. Just your favorite games, running natively.
-```
-
 **An open toolkit for statically recompiling GameCube (Gekko/Flipper) games to native x86-64.**
 
 Ever wanted to take a GameCube classic and run it natively on your PC at full speed, with
@@ -249,6 +238,19 @@ GameCube's Flipper ASIC, derived from public documentation and CC0/public domain
 
 These are invaluable if you're working on any GameCube project — emulator, decompilation,
 or recompilation.
+
+### Debug Tools (`tools/`)
+
+- **`dolphin_dump.py`**: Connects to a running Dolphin emulator via `dolphin-memory-engine`
+  and captures the game's runtime state — process trees, linked lists, SDA globals, and
+  arbitrary memory regions. Outputs JSON for analysis. Useful for understanding how a game's
+  framework system works at runtime, without needing a full decompilation.
+
+  ```bash
+  pip install dolphin-memory-engine
+  # Launch Dolphin with your game, pause emulation, then:
+  python tools/dolphin_dump.py > capture.json
+  ```
 
 ## Want to Recomp Your Favorite GameCube Game?
 
