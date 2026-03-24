@@ -87,10 +87,12 @@ endif()
 # Recompiler Tools: DOL parser, PPC disassembler, symbol map, DOL info
 # ===========================================================================
 if(GCRECOMP_BUILD_TOOLS)
-    # Static library for shared tool code (DOL parser, disassembler, symbols)
+    # Static library for shared tool code (DOL parser, disassembler, CFG, codegen, symbols)
     add_library(gcrecomp_tools STATIC
         tools/recompiler/dol_parser.cpp
         tools/recompiler/ppc_disasm.cpp
+        tools/recompiler/cfg_builder.cpp
+        tools/recompiler/ppc_to_c.cpp
         tools/recompiler/symbol_map.cpp
     )
     target_include_directories(gcrecomp_tools PUBLIC include)
@@ -101,6 +103,13 @@ if(GCRECOMP_BUILD_TOOLS)
     )
     target_link_libraries(gcrecomp_dol_info PRIVATE gcrecomp_tools)
     target_include_directories(gcrecomp_dol_info PRIVATE include)
+
+    # Static Recompiler (PPC -> C)
+    add_executable(gcrecomp_recompiler
+        tools/recompiler/main.cpp
+    )
+    target_link_libraries(gcrecomp_recompiler PRIVATE gcrecomp_tools)
+    target_include_directories(gcrecomp_recompiler PRIVATE include)
 endif()
 
 # ===========================================================================
