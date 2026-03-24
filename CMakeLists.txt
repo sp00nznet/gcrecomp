@@ -84,6 +84,26 @@ if(GCRECOMP_BUILD_RUNTIME)
 endif()
 
 # ===========================================================================
+# Recompiler Tools: DOL parser, PPC disassembler, symbol map, DOL info
+# ===========================================================================
+if(GCRECOMP_BUILD_TOOLS)
+    # Static library for shared tool code (DOL parser, disassembler, symbols)
+    add_library(gcrecomp_tools STATIC
+        tools/recompiler/dol_parser.cpp
+        tools/recompiler/ppc_disasm.cpp
+        tools/recompiler/symbol_map.cpp
+    )
+    target_include_directories(gcrecomp_tools PUBLIC include)
+
+    # DOL Info utility
+    add_executable(gcrecomp_dol_info
+        tools/dol_info/main.cpp
+    )
+    target_link_libraries(gcrecomp_dol_info PRIVATE gcrecomp_tools)
+    target_include_directories(gcrecomp_dol_info PRIVATE include)
+endif()
+
+# ===========================================================================
 # Example Launcher (shows how to use gcrecomp in a game project)
 # ===========================================================================
 if(GCRECOMP_BUILD_EXAMPLE AND GCRECOMP_BUILD_RUNTIME)
