@@ -79,7 +79,7 @@ bool runtime_init() {
     g_ctx.reset();
 
     // Set initial stack pointer (top of main RAM minus space for OS data)
-    g_ctx.r[1] = Memory::MAIN_RAM_BASE + Memory::MAIN_RAM_SIZE - 0x100;
+    g_ctx.r[1] = Memory::MAIN_RAM_BASE + g_mem.ram_size - 0x100;
     // r2 = small data area (SDA2) base -- will be set by DOL loader
     // r13 = small data area (SDA) base -- will be set by DOL loader
 

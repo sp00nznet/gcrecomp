@@ -33,7 +33,7 @@ namespace gcrecomp {
 // the target game. This replaces hardcoded game-specific values.
 // =============================================================================
 struct GameConfig {
-    // 4-character game ID (e.g. "GZLE" for Wind Waker US, "GM8E" for Metroid Prime US)
+    // 4-character game ID (e.g. "GZLE" for Wind Waker US, "GGPE" for MKA Arcade GP)
     char game_id[5] = {0};
 
     // 2-character company/maker code (e.g. "01" for Nintendo)
@@ -45,8 +45,23 @@ struct GameConfig {
     // Disc version
     uint8_t disc_version = 0;
 
+    // Physical RAM size in bytes. Defaults to standard GameCube (24 MB).
+    // Override for variant hardware:
+    //   - GameCube:  24 MB (0x01800000) — standard retail/devkit
+    //   - Triforce:  48 MB (0x03000000) — arcade board (Sega DIMM expansion)
+    //   - Wii MEM1:  24 MB (0x01800000) — Wii backward-compat mode
+    uint32_t ram_size = 24 * 1024 * 1024;
+
+    // Console type written to OS_CONSOLE_TYPE in low memory.
+    // Affects how the game initializes video, I/O, and debug output.
+    // Common values (from gc_hw.h):
+    //   0x00000001 — Retail GameCube
+    //   0x10000002 — Devkit (NPDP/GDEV)
+    //   0x10000004 — Triforce arcade board
+    uint32_t console_type = 0x00000001;  // OS_CONSOLE_RETAIL
+
     // Initial arena bounds. The game's OSInit will adjust these after DOL loading.
-    // These defaults cover a typical layout; override per-game if needed.
+    // These defaults cover a typical GameCube layout; override per-game/platform.
     uint32_t arena_lo = 0x80400000;
     uint32_t arena_hi = 0x81700000;
 };
@@ -177,34 +192,47 @@ struct alignas(16) PPCContext {
 };
 
 // =============================================================================
-// Memory - Big-endian emulated GameCube RAM
+// Memory - Big-endian emulated Gekko RAM
 //
-// The GameCube has 24 MB of main RAM (MEM1) accessible via two virtual
-// address ranges:
-//   0x80000000 - 0x817FFFFF  (cached, used by most code)
-//   0xC0000000 - 0xC17FFFFF  (uncached, same physical memory)
+// Emulates the RAM accessible via two virtual address ranges:
+//   0x80000000 - 0x80xxxxxx  (cached)
+//   0xC0000000 - 0xC0xxxxxx  (uncached, same physical memory)
 //
-// Both ranges map to the same 24 MB backing buffer. All reads and writes
-// use big-endian byte order to match the PowerPC's native endianness.
+// Both ranges map to the same backing buffer. All reads and writes use
+// big-endian byte order to match the PowerPC's native endianness.
 //
-// Reference: "Dolphin (GameCube) Programming" (official SDK docs, NDA),
-//            libogc memory map, Pureikyubu memory subsystem
+// The RAM size is configurable at init() time to support different
+// Gekko-based platforms:
+//   - GameCube:  24 MB (default)
+//   - Triforce:  48 MB (Sega DIMM board expansion)
+//   - Wii MEM1:  24 MB
+//
+// Reference: libogc memory map, Pureikyubu memory subsystem
 // =============================================================================
 struct Memory {
-    static constexpr uint32_t MAIN_RAM_SIZE  = 24 * 1024 * 1024;  // 24 MB
-    static constexpr uint32_t MAIN_RAM_BASE  = 0x80000000;        // Cached base
-    static constexpr uint32_t MAIN_RAM_END   = MAIN_RAM_BASE + MAIN_RAM_SIZE;
-    static constexpr uint32_t UNCACHED_BASE  = 0xC0000000;        // Uncached mirror
-    static constexpr uint32_t HW_REG_BASE   = 0xCC000000;        // Hardware registers
-    static constexpr uint32_t HW_REG_SIZE   = 0x00010000;        // 64 KB of HW regs
+    // Default RAM size (GameCube standard). Can be overridden via init().
+    static constexpr uint32_t DEFAULT_RAM_SIZE = 24 * 1024 * 1024;  // 24 MB
+    static constexpr uint32_t MAIN_RAM_BASE    = 0x80000000;        // Cached base
+    static constexpr uint32_t UNCACHED_BASE    = 0xC0000000;        // Uncached mirror
+    static constexpr uint32_t HW_REG_BASE     = 0xCC000000;        // Hardware registers
+    static constexpr uint32_t HW_REG_SIZE     = 0x00010000;        // 64 KB of HW regs
 
-    // Host-side backing buffer for the 24 MB emulated RAM
+    // Backward-compatible alias — existing code using Memory::MAIN_RAM_SIZE
+    // continues to compile. For runtime-configured sizes, use the ram_size field.
+    static constexpr uint32_t MAIN_RAM_SIZE    = DEFAULT_RAM_SIZE;
+
+    // Actual RAM size and derived end address (set by init())
+    uint32_t ram_size = DEFAULT_RAM_SIZE;
+    uint32_t ram_end  = MAIN_RAM_BASE + DEFAULT_RAM_SIZE;
+
+    // Host-side backing buffer for emulated RAM
     uint8_t* ram = nullptr;
     // Hardware register space (absorbs reads/writes to 0xCC000000-0xCC00FFFF)
     uint8_t hw_regs[HW_REG_SIZE] = {};
 
-    // Allocate the backing buffer. Returns false on failure.
-    bool init();
+    // Allocate the backing buffer. Defaults to 24 MB (standard GameCube).
+    // Pass a larger size for Triforce (48 MB) or other variants.
+    bool init(uint32_t size = DEFAULT_RAM_SIZE);
     // Free the backing buffer.
     void shutdown();
 

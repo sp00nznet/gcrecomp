@@ -903,12 +903,12 @@ void init_low_memory(Memory* mem, const GameConfig& config) {
     mem->write8(hw::OS_DVD_DISC_NUM, config.disc_number);
     mem->write8(hw::OS_DVD_VERSION, config.disc_version);
 
-    // Console type: retail GameCube
-    mem->write32(hw::OS_CONSOLE_TYPE, hw::OS_CONSOLE_RETAIL);
+    // Console type (configurable: retail GC, devkit, Triforce, etc.)
+    mem->write32(hw::OS_CONSOLE_TYPE, config.console_type);
 
-    // Physical memory size: 24 MB
-    mem->write32(hw::OS_PHYSICAL_MEM_SIZE, hw::MEM1_SIZE);
-    mem->write32(hw::OS_SIMULATED_MEM_SIZE, hw::MEM1_SIZE);
+    // Physical memory size (configurable: 24 MB for GC, 48 MB for Triforce, etc.)
+    mem->write32(hw::OS_PHYSICAL_MEM_SIZE, config.ram_size);
+    mem->write32(hw::OS_SIMULATED_MEM_SIZE, config.ram_size);
 
     // Clock speeds (the game reads these for timing calculations)
     mem->write32(hw::OS_BUS_CLOCK, hw::BUS_CLOCK_HZ);
@@ -923,7 +923,7 @@ void init_low_memory(Memory* mem, const GameConfig& config) {
     mem->write32(hw::OS_BOOT_VERSION, 1);
 
     // RAM end address
-    mem->write32(hw::OS_DEBUG_MONITOR, hw::MEM1_END);
+    mem->write32(hw::OS_DEBUG_MONITOR, hw::MEM1_BASE + config.ram_size);
     mem->write32(hw::OS_DEBUG_FLAG, 0);
 
     // Production pads and devkit boot value (from libogc __lowmem_init)
@@ -948,10 +948,13 @@ void init_low_memory(Memory* mem, const GameConfig& config) {
     for (int i = 0; i < 2 && config.company_code[i]; i++) id_str[4 + i] = config.company_code[i];
     id_str[6] = 0;
 
+    // RAM end (use configured size, not hardcoded MEM1_SIZE)
+    mem->write32(hw::OS_RAM_END, hw::MEM1_BASE + config.ram_size);
+
     printf("[OS] Low memory initialized.\n");
     printf("[OS]   Game ID:     %s\n", id_str);
-    printf("[OS]   Console:     Retail GameCube\n");
-    printf("[OS]   RAM:         %u MB\n", hw::MEM1_SIZE / (1024 * 1024));
+    printf("[OS]   Console:     0x%08X\n", config.console_type);
+    printf("[OS]   RAM:         %u MB\n", config.ram_size / (1024 * 1024));
     printf("[OS]   Bus clock:   %u MHz\n", hw::BUS_CLOCK_HZ / 1000000);
     printf("[OS]   CPU clock:   %u MHz\n", hw::CPU_CLOCK_HZ / 1000000);
     printf("[OS]   Arena:       0x%08X - 0x%08X\n",

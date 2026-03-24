@@ -1,17 +1,20 @@
 // =============================================================================
 // Memory System Implementation
 //
-// Emulates the GameCube's 24 MB main RAM with big-endian byte-order access.
-// The GameCube's Gekko CPU is big-endian, so all multi-byte reads and writes
-// in this module store bytes in network (big-endian) order within the backing
-// buffer, matching what the original PowerPC code expects.
+// Emulates Gekko-based system RAM with big-endian byte-order access.
+// The Gekko CPU is big-endian, so all multi-byte reads and writes store
+// bytes in network (big-endian) order within the backing buffer.
 //
 // Virtual address translation:
-//   0x80000000 - 0x817FFFFF  -> physical offset 0x00000000 - 0x017FFFFF (cached)
-//   0xC0000000 - 0xC17FFFFF  -> physical offset 0x00000000 - 0x017FFFFF (uncached)
+//   0x80000000 - 0x80xxxxxx  -> physical offset (cached)
+//   0xC0000000 - 0xC0xxxxxx  -> physical offset (uncached, same memory)
 //
-// Both ranges map to the same 24 MB host-side buffer. Out-of-range accesses
-// log an error and return the buffer base to avoid segfaults during debugging.
+// The RAM size is configurable at init() time:
+//   - GameCube:  24 MB (default)
+//   - Triforce:  48 MB
+//
+// Out-of-range accesses log an error and return the buffer base to avoid
+// segfaults during debugging.
 //
 // References:
 //   - libogc memory map (ogc/system.h)
@@ -27,13 +30,16 @@ namespace gcrecomp {
 
 Memory g_mem;
 
-bool Memory::init() {
-    ram = (uint8_t*)calloc(1, MAIN_RAM_SIZE);
+bool Memory::init(uint32_t size) {
+    ram_size = size;
+    ram_end = MAIN_RAM_BASE + ram_size;
+
+    ram = (uint8_t*)calloc(1, ram_size);
     if (!ram) {
-        fprintf(stderr, "[Memory] Failed to allocate %u MB\n", MAIN_RAM_SIZE / (1024 * 1024));
+        fprintf(stderr, "[Memory] Failed to allocate %u MB\n", ram_size / (1024 * 1024));
         return false;
     }
-    printf("[Memory] Allocated %u MB main RAM\n", MAIN_RAM_SIZE / (1024 * 1024));
+    printf("[Memory] Allocated %u MB main RAM\n", ram_size / (1024 * 1024));
     return true;
 }
 
@@ -45,16 +51,16 @@ void Memory::shutdown() {
 }
 
 uint8_t* Memory::translate(uint32_t addr) {
-    // Cached region: 0x80000000 - 0x817FFFFF
-    if (addr >= MAIN_RAM_BASE && addr < MAIN_RAM_END) {
+    // Cached region: 0x80000000 - 0x80000000+ram_size
+    if (addr >= MAIN_RAM_BASE && addr < ram_end) {
         return ram + (addr - MAIN_RAM_BASE);
     }
-    // Uncached region: 0xC0000000 - 0xC17FFFFF (same physical memory)
-    if (addr >= UNCACHED_BASE && addr < UNCACHED_BASE + MAIN_RAM_SIZE) {
+    // Uncached region: 0xC0000000 - 0xC0000000+ram_size (same physical memory)
+    if (addr >= UNCACHED_BASE && addr < UNCACHED_BASE + ram_size) {
         return ram + (addr - UNCACHED_BASE);
     }
-    // Physical address: 0x00000000 - 0x017FFFFF (some init code uses physical addrs)
-    if (addr < MAIN_RAM_SIZE) {
+    // Physical address: 0x00000000 - ram_size (some init code uses physical addrs)
+    if (addr < ram_size) {
         return ram + addr;
     }
     // Hardware registers: 0xCC000000 - 0xCC00FFFF
