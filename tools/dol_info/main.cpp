@@ -14,7 +14,9 @@
 #include "gcrecomp/ppc.h"
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <map>
+#include <vector>
 
 using namespace gcrecomp;
 
