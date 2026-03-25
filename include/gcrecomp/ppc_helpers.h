@@ -6,12 +6,15 @@
 // to single C expressions. The recompiler emits calls to these in the
 // generated code.
 //
-// NOTE: PSQ (Paired Singles Quantized) helpers require memory access macros
-// and are defined in recomp_common.h after the MEM_* macro definitions.
+// Pure computation helpers (CNTLZW, ROTL32, MFTBL, MFTBU) are standalone.
+// PSQ (Paired Singles Quantized) helpers take a Memory& parameter so they
+// can access emulated RAM without depending on macros. Wrapper macros that
+// pass g_mem are defined in the auto-generated recomp_common.h.
 // =============================================================================
 
 #include <cstdint>
 #include <cstring>
+#include "gcrecomp/runtime.h"
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -73,4 +76,82 @@ inline uint32_t PPC_MFTBU() {
 #else
     return 0;
 #endif
+}
+
+// =============================================================================
+// PSQ (Paired Singles Quantized) Load/Store Helpers
+//
+// These implement the quantized load/store operations used by the Gekko's
+// paired-single instructions (psq_l, psq_st, etc.). The GQR (Graphics
+// Quantization Register) encodes the data type and scale factor:
+//   Load:  type = bits [2:0], scale = bits [13:8]
+//   Store: type = bits [18:16], scale = bits [29:24]
+//
+// Each function takes a Memory& parameter; the auto-generated recomp_common.h
+// defines wrapper macros (PSQ_LOAD_ONE, etc.) that pass g_mem.
+// =============================================================================
+
+// Quantization types from GQR
+enum PSQ_Type : uint32_t {
+    PSQ_TYPE_FLOAT = 0,
+    PSQ_TYPE_U8    = 4,
+    PSQ_TYPE_S8    = 5,
+    PSQ_TYPE_U16   = 6,
+    PSQ_TYPE_S16   = 7,
+};
+
+inline float psq_load_one(gcrecomp::Memory& mem, uint32_t addr, uint32_t gqr) {
+    uint32_t type  = gqr & 0x7;
+    uint32_t scale = (gqr >> 8) & 0x3F;
+    float divisor  = static_cast<float>(1u << scale);
+    switch (type) {
+        case PSQ_TYPE_FLOAT: { uint32_t raw = mem.read32(addr); float val; memcpy(&val, &raw, 4); return val; }
+        case PSQ_TYPE_U8:  return static_cast<float>(mem.read8(addr)) / divisor;
+        case PSQ_TYPE_S8:  return static_cast<float>(static_cast<int8_t>(mem.read8(addr))) / divisor;
+        case PSQ_TYPE_U16: return static_cast<float>(mem.read16(addr)) / divisor;
+        case PSQ_TYPE_S16: return static_cast<float>(static_cast<int16_t>(mem.read16(addr))) / divisor;
+        default: return 0.0f;
+    }
+}
+
+inline void psq_load_pair(gcrecomp::Memory& mem, float* ps0, float* ps1, uint32_t addr, uint32_t gqr) {
+    uint32_t type  = gqr & 0x7;
+    uint32_t scale = (gqr >> 8) & 0x3F;
+    float divisor  = static_cast<float>(1u << scale);
+    switch (type) {
+        case PSQ_TYPE_FLOAT: { uint32_t r0 = mem.read32(addr); uint32_t r1 = mem.read32(addr+4); memcpy(ps0, &r0, 4); memcpy(ps1, &r1, 4); break; }
+        case PSQ_TYPE_U8:  *ps0 = static_cast<float>(mem.read8(addr))/divisor; *ps1 = static_cast<float>(mem.read8(addr+1))/divisor; break;
+        case PSQ_TYPE_S8:  *ps0 = static_cast<float>(static_cast<int8_t>(mem.read8(addr)))/divisor; *ps1 = static_cast<float>(static_cast<int8_t>(mem.read8(addr+1)))/divisor; break;
+        case PSQ_TYPE_U16: *ps0 = static_cast<float>(mem.read16(addr))/divisor; *ps1 = static_cast<float>(mem.read16(addr+2))/divisor; break;
+        case PSQ_TYPE_S16: *ps0 = static_cast<float>(static_cast<int16_t>(mem.read16(addr)))/divisor; *ps1 = static_cast<float>(static_cast<int16_t>(mem.read16(addr+2)))/divisor; break;
+        default: *ps0 = *ps1 = 0.0f; break;
+    }
+}
+
+inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint32_t gqr) {
+    uint32_t type  = (gqr >> 16) & 0x7;
+    uint32_t scale = (gqr >> 24) & 0x3F;
+    float mul = static_cast<float>(1u << scale);
+    switch (type) {
+        case PSQ_TYPE_FLOAT: { uint32_t raw; memcpy(&raw, &val, 4); mem.write32(addr, raw); break; }
+        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(val*mul)); break;
+        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(val*mul))); break;
+        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(val*mul)); break;
+        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(val*mul))); break;
+        default: break;
+    }
+}
+
+inline void psq_store_pair(gcrecomp::Memory& mem, float v0, float v1, uint32_t addr, uint32_t gqr) {
+    uint32_t type  = (gqr >> 16) & 0x7;
+    uint32_t scale = (gqr >> 24) & 0x3F;
+    float mul = static_cast<float>(1u << scale);
+    switch (type) {
+        case PSQ_TYPE_FLOAT: { uint32_t r0,r1; memcpy(&r0,&v0,4); memcpy(&r1,&v1,4); mem.write32(addr,r0); mem.write32(addr+4,r1); break; }
+        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(v0*mul)); mem.write8(addr+1, static_cast<uint8_t>(v1*mul)); break;
+        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(v0*mul))); mem.write8(addr+1, static_cast<uint8_t>(static_cast<int8_t>(v1*mul))); break;
+        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(v0*mul)); mem.write16(addr+2, static_cast<uint16_t>(v1*mul)); break;
+        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(v0*mul))); mem.write16(addr+2, static_cast<uint16_t>(static_cast<int16_t>(v1*mul))); break;
+        default: break;
+    }
 }
