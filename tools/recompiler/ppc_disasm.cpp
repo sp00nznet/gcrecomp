@@ -414,9 +414,14 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         case 83:  insn.type = PPCInsnType::MFMSR;  insn.mnemonic = "mfmsr"; break;
         case 146: insn.type = PPCInsnType::MTMSR;  insn.mnemonic = "mtmsr"; break;
         case 306: insn.type = PPCInsnType::TLBIE;  insn.mnemonic = "tlbie"; break;
+        case 370: insn.type = PPCInsnType::TLBIE;  insn.mnemonic = "tlbia"; break;
         case 566: insn.type = PPCInsnType::TLBSYNC;insn.mnemonic = "tlbsync"; break;
         case 978: insn.type = PPCInsnType::DCBZ_L; insn.mnemonic = "dcbz_l"; break;
         case 470: insn.type = PPCInsnType::DCBI;   insn.mnemonic = "dcbi"; break;
+        // Segment register ops (supervisor, no-ops in recomp)
+        case 210: insn.type = PPCInsnType::SYNC;   insn.mnemonic = "mtsrin"; break;
+        case 595: insn.type = PPCInsnType::SYNC;   insn.mnemonic = "mfsrin"; break;
+        case 242: insn.type = PPCInsnType::SYNC;   insn.mnemonic = "mfsr"; break;
         case 371: insn.type = PPCInsnType::MFSPR;  insn.mnemonic = "mftb";
                   insn.spr = PPC_SPR(raw); break;
         case 4:   insn.type = PPCInsnType::TW;     insn.mnemonic = "tw"; break;
