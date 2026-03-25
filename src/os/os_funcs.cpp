@@ -35,7 +35,9 @@
 #include <cstring>
 #include <cmath>
 #include <chrono>
+#include <filesystem>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -962,6 +964,426 @@ void init_low_memory(Memory* mem, const GameConfig& config) {
 }
 
 // =============================================================================
+// Video Interface (VI) HLE
+//
+// The GameCube's VI controls video output timing and framebuffer display.
+// VIWaitForRetrace is critical -- without it, the game loop spins at
+// infinite speed and the game hangs waiting for VBlank. We simulate 60Hz
+// timing with a 16.67ms sleep.
+//
+// Reference: libogc ogc/video.h
+// =============================================================================
+
+static uint32_t g_vi_framebuffer = 0;
+static uint32_t g_vi_black = 0;
+static uint32_t g_vi_retrace_count = 0;
+
+static void vi_init(PPCContext* ctx, Memory* mem) {
+    printf("[VI] VIInit\n");
+}
+
+static void vi_configure(PPCContext* ctx, Memory* mem) {
+    printf("[VI] VIConfigure\n");
+}
+
+static void vi_set_next_framebuffer(PPCContext* ctx, Memory* mem) {
+    g_vi_framebuffer = ctx->r[3];
+    printf("[VI] VISetNextFrameBuffer 0x%08X\n", g_vi_framebuffer);
+}
+
+static void vi_flush(PPCContext* ctx, Memory* mem) {
+    printf("[VI] VIFlush\n");
+}
+
+static void vi_set_black(PPCContext* ctx, Memory* mem) {
+    g_vi_black = ctx->r[3];
+    printf("[VI] VISetBlack %d\n", g_vi_black);
+}
+
+// VIWaitForRetrace: sleep ~16.67ms to simulate 60Hz VBlank.
+// Without this the game loop runs at infinite speed and hangs.
+static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
+    g_vi_retrace_count++;
+    std::this_thread::sleep_for(std::chrono::microseconds(16667));
+}
+
+static void vi_get_retrace_count(PPCContext* ctx, Memory* mem) {
+    ctx->r[3] = g_vi_retrace_count;
+}
+
+static void vi_get_tv_format(PPCContext* ctx, Memory* mem) {
+    ctx->r[3] = 0; // NTSC
+}
+
+static void vi_get_dtv_status(PPCContext* ctx, Memory* mem) {
+    ctx->r[3] = 0;
+}
+
+// =============================================================================
+// Init Stubs
+//
+// These are called during game boot but their real work is either handled
+// elsewhere (e.g. runtime_init) or not needed in a recompilation context.
+// =============================================================================
+
+static void os_init_stub(PPCContext* ctx, Memory* mem) {
+    printf("[OS] OSInit\n");
+}
+
+static void dvd_init_stub(PPCContext* ctx, Memory* mem) {
+    printf("[DVD] DVDInit\n");
+}
+
+static void os_init_system_call_stub(PPCContext* ctx, Memory* mem) {
+    printf("[OS] __OSInitSystemCall\n");
+}
+
+static void ps_init_stub(PPCContext* ctx, Memory* mem) {
+    printf("[OS] PSInit\n");
+}
+
+static void ai_init_stub(PPCContext* ctx, Memory* mem) {
+    printf("[AI] AIInit\n");
+}
+
+static void dsp_init_stub(PPCContext* ctx, Memory* mem) {
+    printf("[DSP] DSPInit\n");
+}
+
+// =============================================================================
+// Memory Card (CARD) HLE
+//
+// The GameCube CARD API provides access to memory card slots A and B. In a
+// static recompilation, we back each slot with a host-side directory:
+//   Slot A -> ./memcard_a/
+//   Slot B -> ./memcard_b/
+// Files on the "card" are simply files in that directory.
+//
+// Reference: libogc ogc/card.h
+// =============================================================================
+
+// CARD return codes
+static constexpr int32_t CARD_RESULT_READY   =  0;
+static constexpr int32_t CARD_RESULT_BUSY    = -1;
+static constexpr int32_t CARD_RESULT_NOCARD  = -3;
+static constexpr int32_t CARD_RESULT_NOFILE  = -4;
+static constexpr int32_t CARD_RESULT_IOERROR = -6;
+
+static constexpr uint32_t CARD_MEM_SIZE    = 0x200000;  // 2 MB (standard card)
+static constexpr uint32_t CARD_SECTOR_SIZE = 0x2000;    // 8 KB sector
+
+static constexpr int CARD_MAX_SLOTS = 2;
+
+// Per-slot state
+struct CardSlotState {
+    bool mounted = false;
+};
+static CardSlotState g_card_slots[CARD_MAX_SLOTS];
+
+// Track open files: maps fileInfo emulated address -> (slot, filename)
+struct CardOpenFile {
+    int         slot;
+    std::string filename;
+};
+static std::unordered_map<uint32_t, CardOpenFile> g_card_open_files;
+
+// Internal file number counter (simple monotonic assignment)
+static int g_card_next_file_no = 1;
+
+// Helper: get the host directory path for a card slot
+static std::string card_slot_dir(int slot) {
+    return (slot == 0) ? "./memcard_a" : "./memcard_b";
+}
+
+// Helper: read a null-terminated string from emulated memory
+static std::string card_read_string(Memory* mem, uint32_t addr) {
+    std::string s;
+    for (int i = 0; i < 256; i++) {
+        char c = (char)mem->read8(addr + i);
+        if (c == 0) break;
+        s += c;
+    }
+    return s;
+}
+
+// CARDInit -- initialize the card system, create memcard directories
+static void card_init(PPCContext* ctx, Memory* mem) {
+    namespace fs = std::filesystem;
+    fs::create_directories(card_slot_dir(0));
+    fs::create_directories(card_slot_dir(1));
+    printf("[CARD] CARDInit: memcard directories ready\n");
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDProbeEx(slot, memSize_ptr, sectorSize_ptr) -> result
+static void card_probe_ex(PPCContext* ctx, Memory* mem) {
+    uint32_t slot          = ctx->r[3];
+    uint32_t mem_size_ptr  = ctx->r[4];
+    uint32_t sec_size_ptr  = ctx->r[5];
+
+    if (mem_size_ptr) mem->write32(mem_size_ptr, CARD_MEM_SIZE);
+    if (sec_size_ptr) mem->write32(sec_size_ptr, CARD_SECTOR_SIZE);
+
+    printf("[CARD] CARDProbeEx: slot=%u memSize=0x%X sectorSize=0x%X\n",
+           slot, CARD_MEM_SIZE, CARD_SECTOR_SIZE);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDMount(slot, workArea, detachCallback) -> result
+static void card_mount(PPCContext* ctx, Memory* mem) {
+    uint32_t slot = ctx->r[3];
+    if (slot < CARD_MAX_SLOTS) {
+        g_card_slots[slot].mounted = true;
+        printf("[CARD] CARDMount: slot %u mounted\n", slot);
+        ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+    } else {
+        printf("[CARD] CARDMount: invalid slot %u\n", slot);
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOCARD;
+    }
+}
+
+// CARDUnmount(slot) -> result
+static void card_unmount(PPCContext* ctx, Memory* mem) {
+    uint32_t slot = ctx->r[3];
+    if (slot < CARD_MAX_SLOTS) {
+        g_card_slots[slot].mounted = false;
+        printf("[CARD] CARDUnmount: slot %u unmounted\n", slot);
+        ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+    } else {
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOCARD;
+    }
+}
+
+// CARDOpen(slot, fileName_ptr, fileInfo_ptr) -> result
+// CARDFileInfo layout: offset 0 = channel (int32), offset 4 = fileNo (int32)
+static void card_open(PPCContext* ctx, Memory* mem) {
+    uint32_t slot          = ctx->r[3];
+    uint32_t filename_addr = ctx->r[4];
+    uint32_t fileinfo_addr = ctx->r[5];
+
+    std::string filename = card_read_string(mem, filename_addr);
+    std::string host_path = card_slot_dir(slot) + "/" + filename;
+
+    namespace fs = std::filesystem;
+    if (!fs::exists(host_path)) {
+        printf("[CARD] CARDOpen: file not found: %s\n", host_path.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOFILE;
+        return;
+    }
+
+    // Write CARDFileInfo: channel = slot, fileNo = assigned number
+    int file_no = g_card_next_file_no++;
+    mem->write32(fileinfo_addr + 0, slot);
+    mem->write32(fileinfo_addr + 4, (uint32_t)file_no);
+
+    // Track the open file
+    g_card_open_files[fileinfo_addr] = { (int)slot, filename };
+
+    printf("[CARD] CARDOpen: slot=%u file=\"%s\" fileNo=%d\n", slot, filename.c_str(), file_no);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDCreate(slot, fileName_ptr, size, fileInfo_ptr) -> result
+static void card_create(PPCContext* ctx, Memory* mem) {
+    uint32_t slot          = ctx->r[3];
+    uint32_t filename_addr = ctx->r[4];
+    uint32_t size          = ctx->r[5];
+    uint32_t fileinfo_addr = ctx->r[6];
+
+    std::string filename = card_read_string(mem, filename_addr);
+    std::string host_path = card_slot_dir(slot) + "/" + filename;
+
+    // Create (or overwrite) the file with the requested size, zero-filled
+    FILE* fp = fopen(host_path.c_str(), "wb");
+    if (!fp) {
+        printf("[CARD] CARDCreate: failed to create %s\n", host_path.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_IOERROR;
+        return;
+    }
+    // Write zeroes to fill to the requested size
+    std::vector<uint8_t> zeroes(size, 0);
+    fwrite(zeroes.data(), 1, size, fp);
+    fclose(fp);
+
+    // Write CARDFileInfo
+    int file_no = g_card_next_file_no++;
+    mem->write32(fileinfo_addr + 0, slot);
+    mem->write32(fileinfo_addr + 4, (uint32_t)file_no);
+
+    // Track the open file
+    g_card_open_files[fileinfo_addr] = { (int)slot, filename };
+
+    printf("[CARD] CARDCreate: slot=%u file=\"%s\" size=%u\n", slot, filename.c_str(), size);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDRead(fileInfo_ptr, buffer, length, offset) -> result
+static void card_read(PPCContext* ctx, Memory* mem) {
+    uint32_t fileinfo_addr = ctx->r[3];
+    uint32_t buffer_addr   = ctx->r[4];
+    uint32_t length        = ctx->r[5];
+    uint32_t offset        = ctx->r[6];
+
+    // Look up slot from fileInfo
+    uint32_t slot = mem->read32(fileinfo_addr + 0);
+
+    auto it = g_card_open_files.find(fileinfo_addr);
+    if (it == g_card_open_files.end()) {
+        printf("[CARD] CARDRead: no open file for fileInfo 0x%08X\n", fileinfo_addr);
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOFILE;
+        return;
+    }
+
+    std::string host_path = card_slot_dir(slot) + "/" + it->second.filename;
+    FILE* fp = fopen(host_path.c_str(), "rb");
+    if (!fp) {
+        printf("[CARD] CARDRead: failed to open %s\n", host_path.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_IOERROR;
+        return;
+    }
+
+    fseek(fp, offset, SEEK_SET);
+    uint8_t* dst = mem->translate(buffer_addr);
+    if (dst) {
+        size_t read_bytes = fread(dst, 1, length, fp);
+        printf("[CARD] CARDRead: slot=%u file=\"%s\" offset=%u len=%u read=%zu\n",
+               slot, it->second.filename.c_str(), offset, length, read_bytes);
+    }
+    fclose(fp);
+
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDWrite(fileInfo_ptr, buffer, length, offset) -> result
+static void card_write(PPCContext* ctx, Memory* mem) {
+    uint32_t fileinfo_addr = ctx->r[3];
+    uint32_t buffer_addr   = ctx->r[4];
+    uint32_t length        = ctx->r[5];
+    uint32_t offset        = ctx->r[6];
+
+    uint32_t slot = mem->read32(fileinfo_addr + 0);
+
+    auto it = g_card_open_files.find(fileinfo_addr);
+    if (it == g_card_open_files.end()) {
+        printf("[CARD] CARDWrite: no open file for fileInfo 0x%08X\n", fileinfo_addr);
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOFILE;
+        return;
+    }
+
+    std::string host_path = card_slot_dir(slot) + "/" + it->second.filename;
+
+    // Open for read+write (binary), preserving existing content
+    FILE* fp = fopen(host_path.c_str(), "r+b");
+    if (!fp) {
+        // File may not exist yet; create it
+        fp = fopen(host_path.c_str(), "wb");
+    }
+    if (!fp) {
+        printf("[CARD] CARDWrite: failed to open %s for writing\n", host_path.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_IOERROR;
+        return;
+    }
+
+    fseek(fp, offset, SEEK_SET);
+    const uint8_t* src = mem->translate(buffer_addr);
+    if (src) {
+        size_t written = fwrite(src, 1, length, fp);
+        printf("[CARD] CARDWrite: slot=%u file=\"%s\" offset=%u len=%u written=%zu\n",
+               slot, it->second.filename.c_str(), offset, length, written);
+    }
+    fclose(fp);
+
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDClose(fileInfo_ptr) -> result
+static void card_close(PPCContext* ctx, Memory* mem) {
+    uint32_t fileinfo_addr = ctx->r[3];
+
+    auto it = g_card_open_files.find(fileinfo_addr);
+    if (it != g_card_open_files.end()) {
+        printf("[CARD] CARDClose: file=\"%s\"\n", it->second.filename.c_str());
+        g_card_open_files.erase(it);
+    }
+
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDGetResultCode(slot) -> result
+static void card_get_result_code(PPCContext* ctx, Memory* mem) {
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDGetSectorSize(slot, size_ptr) -> result
+static void card_get_sector_size(PPCContext* ctx, Memory* mem) {
+    uint32_t size_ptr = ctx->r[4];
+    if (size_ptr) mem->write32(size_ptr, CARD_SECTOR_SIZE);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDFreeBlocks(slot, byteNotSector, freeBlocks_ptr) -> result
+static void card_free_blocks(PPCContext* ctx, Memory* mem) {
+    uint32_t slot            = ctx->r[3];
+    uint32_t byte_not_sector = ctx->r[4];
+    uint32_t free_ptr        = ctx->r[5];
+
+    // Report ~1.5 MB free (reasonable for a 2 MB card with some usage)
+    uint32_t free_bytes = 0x180000;
+    if (free_ptr) {
+        if (byte_not_sector) {
+            mem->write32(free_ptr, free_bytes);
+        } else {
+            mem->write32(free_ptr, free_bytes / CARD_SECTOR_SIZE);
+        }
+    }
+    printf("[CARD] CARDFreeBlocks: slot=%u free=0x%X bytes\n", slot, free_bytes);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDGetStatus(slot, fileNo, stat_ptr) -> result
+// Writes basic status info. The CARDStat struct starts with the filename
+// (32 bytes), followed by length, time, etc. We fill in what we can.
+static void card_get_status(PPCContext* ctx, Memory* mem) {
+    uint32_t slot     = ctx->r[3];
+    uint32_t file_no  = ctx->r[4];
+    uint32_t stat_ptr = ctx->r[5];
+
+    if (stat_ptr) {
+        // Zero out the stat struct (64 bytes is a safe conservative size)
+        for (uint32_t i = 0; i < 64; i++) {
+            mem->write8(stat_ptr + i, 0);
+        }
+    }
+    printf("[CARD] CARDGetStatus: slot=%u fileNo=%u (stub)\n", slot, file_no);
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDSetStatus(slot, fileNo, stat_ptr) -> result (stub)
+static void card_set_status(PPCContext* ctx, Memory* mem) {
+    printf("[CARD] CARDSetStatus: stub\n");
+    ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+}
+
+// CARDDelete(slot, fileName_ptr) -> result
+static void card_delete(PPCContext* ctx, Memory* mem) {
+    uint32_t slot          = ctx->r[3];
+    uint32_t filename_addr = ctx->r[4];
+
+    std::string filename = card_read_string(mem, filename_addr);
+    std::string host_path = card_slot_dir(slot) + "/" + filename;
+
+    namespace fs = std::filesystem;
+    if (fs::exists(host_path)) {
+        fs::remove(host_path);
+        printf("[CARD] CARDDelete: slot=%u file=\"%s\" deleted\n", slot, filename.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_READY;
+    } else {
+        printf("[CARD] CARDDelete: slot=%u file=\"%s\" not found\n", slot, filename.c_str());
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOFILE;
+    }
+}
+
+// =============================================================================
 // OS Function Registration
 //
 // Maps known SDK symbol names to our native HLE implementations. The
@@ -1065,6 +1487,42 @@ static const OSFuncEntry g_os_func_table[] = {
     { "OSInitMessageQueue",     os_init_message_queue },
     { "OSSendMessage",          os_send_message },
     { "OSReceiveMessage",       os_receive_message },
+
+    // --- Video Interface (VI) ---
+    { "VIInit",                 vi_init },
+    { "VIConfigure",            vi_configure },
+    { "VISetNextFrameBuffer",   vi_set_next_framebuffer },
+    { "VIFlush",                vi_flush },
+    { "VISetBlack",             vi_set_black },
+    { "VIWaitForRetrace",       vi_wait_for_retrace },
+    { "VIGetRetraceCount",      vi_get_retrace_count },
+    { "VIGetTvFormat",          vi_get_tv_format },
+    { "VIGetDTVStatus",         vi_get_dtv_status },
+
+    // --- Init Stubs ---
+    { "OSInit",                 os_init_stub },
+    { "DVDInit",                dvd_init_stub },
+    { "__OSInitSystemCall",     os_init_system_call_stub },
+    { "PSInit",                 ps_init_stub },
+    { "AIInit",                 ai_init_stub },
+    { "DSPInit",                dsp_init_stub },
+
+    // --- Memory Card (CARD) ---
+    { "CARDInit",               card_init },
+    { "CARDProbeEx",            card_probe_ex },
+    { "CARDMount",              card_mount },
+    { "CARDUnmount",            card_unmount },
+    { "CARDOpen",               card_open },
+    { "CARDCreate",             card_create },
+    { "CARDRead",               card_read },
+    { "CARDWrite",              card_write },
+    { "CARDClose",              card_close },
+    { "CARDGetResultCode",      card_get_result_code },
+    { "CARDGetSectorSize",      card_get_sector_size },
+    { "CARDFreeBlocks",         card_free_blocks },
+    { "CARDGetStatus",          card_get_status },
+    { "CARDSetStatus",          card_set_status },
+    { "CARDDelete",             card_delete },
 
     { nullptr, nullptr }  // Sentinel
 };
