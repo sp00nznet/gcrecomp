@@ -39,16 +39,22 @@ RecompiledFunc FuncTable::lookup(uint32_t gc_addr) const {
 void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
     if (gc_addr == 0) return; // Null function pointer — skip silently
 
-    // Quick range check: valid code is in 0x80003100 - 0x80340000 (DOL text+data).
-    // Addresses outside this range are garbage from uninitialized vtables/data.
-    // Note: some function pointers point into data sections (0x80338680+) for
-    // trampolines, so we use a generous upper bound.
-    if (gc_addr < 0x80003100 || gc_addr >= 0x80400000 || (gc_addr & 3) != 0) {
+    // Basic sanity check: must be in GameCube RAM range and 4-byte aligned.
+    // Valid code addresses are 0x80000000 - 0x82FFFFFF (up to 48 MB for Triforce).
+    if (gc_addr < 0x80000000 || gc_addr >= 0x83000000 || (gc_addr & 3) != 0) {
         return; // Not a valid code address — skip silently
     }
 
     RecompiledFunc func = lookup(gc_addr);
     if (func) {
+        // Trace indirect calls to understand execution flow
+        static int indirect_count = 0;
+        indirect_count++;
+        if (indirect_count <= 20 || (indirect_count % 10000 == 0)) {
+            printf("[Trace] Indirect call #%d -> 0x%08X (LR=0x%08X)\n",
+                   indirect_count, gc_addr, ctx->lr);
+            fflush(stdout);
+        }
         func(ctx, mem);
     } else {
         // Rate-limit unresolved call warnings
@@ -57,14 +63,16 @@ void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
         unresolved_count++;
         int& addr_count = seen[gc_addr];
         addr_count++;
-        if (addr_count <= 1) {
-            fprintf(stderr, "[FuncTable] Unresolved call to 0x%08X (LR=0x%08X)\n",
+        if (addr_count <= 3) {
+            printf("[FuncTable] Unresolved call to 0x%08X (LR=0x%08X)\n",
                     gc_addr, ctx->lr);
+            fflush(stdout);
         }
-        if (unresolved_count == 100 || unresolved_count == 1000 ||
-            (unresolved_count % 10000 == 0)) {
-            fprintf(stderr, "[FuncTable] %d total unresolved calls (%zu unique addresses)\n",
+        if (unresolved_count == 50 || unresolved_count == 200 ||
+            unresolved_count == 1000 || (unresolved_count % 5000 == 0)) {
+            printf("[FuncTable] %d total unresolved calls (%zu unique addresses)\n",
                     unresolved_count, seen.size());
+            fflush(stdout);
         }
     }
 }

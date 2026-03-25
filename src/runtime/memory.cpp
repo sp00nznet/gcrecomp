@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 namespace gcrecomp {
 
@@ -91,6 +92,56 @@ uint16_t Memory::read16(uint32_t addr) const {
 }
 
 uint32_t Memory::read32(uint32_t addr) const {
+    // HW register HLE for reads
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        static std::unordered_map<uint32_t, int> hw_read_count;
+        int& count = hw_read_count[addr];
+        if (count < 3) {
+            const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+            uint32_t val = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                           ((uint32_t)p[2] << 8) | p[3];
+            printf("[HW] Read32 0x%08X = 0x%08X\n", addr, val);
+            fflush(stdout);
+        }
+        count++;
+        if (count == 100) {
+            printf("[HW] Read32 0x%08X spinning (100 reads)!\n", addr);
+            fflush(stdout);
+        }
+
+        // VI: Simulate advancing half-line counter so VIWaitForRetrace works.
+        // Real VI generates interrupts at vertical blank (line 263/525 for NTSC).
+        // 0xCC002000+0x24 = 0xCC002024 = VI_VCOUNT (vertical beam position)
+        // 0xCC002000+0x2C = 0xCC00202C = VI_DISPLAY_INT0 (retrace match)
+        if (addr == 0xCC002024 || addr == 0xCC00202C) {
+            // Increment line counter to simulate video scan
+            static uint16_t vi_line = 0;
+            vi_line = (vi_line + 1) % 526;
+            uint8_t* p = const_cast<uint8_t*>(hw_regs + (0xCC002024 - HW_REG_BASE));
+            p[0] = 0; p[1] = 0; p[2] = (uint8_t)(vi_line >> 8); p[3] = (uint8_t)vi_line;
+        }
+
+        // SI: Report TCINT (transfer complete) for SI poll commands.
+        // 0xCC006434 = SI Ch0 Status — bit 31 = TCINT (transfer complete)
+        if (addr == 0xCC006434) {
+            uint8_t* p = const_cast<uint8_t*>(hw_regs + (addr - HW_REG_BASE));
+            p[0] |= 0x80;  // Set TCINT (transfer complete)
+        }
+
+        // DI (DVD Interface) registers
+        // 0xCC006000 = DISR — DVD Status (bit 0 = TCINT, bit 2 = BRKINT, bit 4 = DEINT)
+        // 0xCC006004 = DICVR — DVD Cover (bit 0 = CVRINT, bit 2 = CVR state)
+        // 0xCC006024 = DICVR alias or DVD Cover Register
+        if (addr == 0xCC006000 || addr == 0xCC006024) {
+            uint8_t* p = const_cast<uint8_t*>(hw_regs + (addr - HW_REG_BASE));
+            p[3] |= 0x01;  // TCINT = transfer complete
+        }
+        // DI Cover register — report disc inserted (CVR = 0 means closed)
+        if (addr == 0xCC006004) {
+            uint8_t* p = const_cast<uint8_t*>(hw_regs + (addr - HW_REG_BASE));
+            p[3] &= ~0x04;  // CVR bit 2 = 0 means cover closed / disc present
+        }
+    }
     const uint8_t* p = translate(addr);
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
@@ -130,6 +181,19 @@ static constexpr uint32_t EXI_CH_SIZE = 0x14;
 //   +0x10 = DATA (Immediate data)
 
 static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
+    // Log HW register accesses (rate-limited)
+    static std::unordered_map<uint32_t, int> hw_access_count;
+    int& count = hw_access_count[addr];
+    if (count < 3) {
+        printf("[HW] Write32 0x%08X = 0x%08X\n", addr, val);
+        fflush(stdout);
+    }
+    count++;
+    if (count == 100 || count == 1000 || count == 10000) {
+        printf("[HW] Write32 0x%08X hit %d times\n", addr, count);
+        fflush(stdout);
+    }
+
     // EXI DMA Control Register: when TSTART (bit 0) is set, immediately
     // complete the transfer by clearing it. On real hardware the EXI
     // controller does the DMA and clears TSTART when done.
