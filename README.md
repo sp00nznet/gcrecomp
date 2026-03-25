@@ -177,6 +177,10 @@ needs for asset loading.
 | **Math** | sin/cos/sqrt/atan2/pow/floor/ceil etc. | Done |
 | **Debug** | OSReport/OSPanic/OSFatal | Done |
 | **Low Memory Init** | Boot state: clocks, game ID, arena, console type | Done |
+| **VI** | VIInit/Configure/WaitForRetrace/Flush/SetBlack/GetTvFormat | Done |
+| **CARD** | CARDInit/Mount/Open/Read/Write/Create/Delete (host FS backed) | Done |
+| **Init Stubs** | OSInit/DVDInit/PSInit/AIInit/DSPInit/__OSInitSystemCall | Done |
+| **PPC Helpers** | PPC_CNTLZW/ROTL32/MFTBL/MFTBU + PSQ load/store | Done |
 
 ### GX Graphics (`src/gx/`)
 
