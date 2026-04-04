@@ -8,6 +8,7 @@
 // =============================================================================
 
 #include "gcrecomp/ppc.h"
+#include "gcrecomp/cfg.h"
 #include <cstdio>
 #include <vector>
 
@@ -18,6 +19,7 @@ public:
     FILE* out;
     int   indent_level;
     std::vector<uint32_t> block_addrs;
+    const BasicBlock* current_block = nullptr;
 
     PPCToCEmitter(FILE* f) : out(f), indent_level(1) {}
 

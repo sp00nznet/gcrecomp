@@ -243,12 +243,14 @@ int main(int argc, char** argv) {
 
         for (uint32_t block_addr : func.block_addrs) {
             auto& block = func.blocks[block_addr];
+            emitter.current_block = &block;
             fprintf(current_file, "label_%08X:\n", block_addr);
 
             for (const auto& insn : block.instructions) {
                 emitter.emit_insn(insn);
             }
         }
+        emitter.current_block = nullptr;
 
         fprintf(current_file, "}\n");
         func_count++;

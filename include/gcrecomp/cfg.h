@@ -22,6 +22,7 @@ struct BasicBlock {
     std::vector<uint32_t> successors;
     std::vector<uint32_t> predecessors;
     std::vector<PPCInsn>  instructions;
+    std::vector<uint32_t> jump_table_targets; // Resolved targets from bctr switch tables
     bool     is_entry;
     bool     is_return;
 };
@@ -45,6 +46,7 @@ struct CFG {
     void build_functions(const DOLFile& dol);
     void discover_functions(const DOLFile& dol);
     void build_blocks(Function& func, const DOLFile& dol);
+    std::vector<uint32_t> detect_jump_table(const Function& func, uint32_t bctr_addr, const DOLFile& dol);
     void print_stats() const;
 };
 

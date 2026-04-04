@@ -192,7 +192,14 @@ void CFG::build_blocks(Function& func, const DOLFile& dol) {
                     break;
                 }
                 else if (insn.type == PPCInsnType::BCCTR && !insn.link) {
-                    // Indirect branch via CTR — could be switch table
+                    // Indirect branch via CTR — try to resolve switch table
+                    auto jt_targets = detect_jump_table(func, pc, dol);
+                    for (uint32_t target : jt_targets) {
+                        if (dol.is_code(target) && !block_starts.count(target)) {
+                            block_starts.insert(target);
+                            work.push(target);
+                        }
+                    }
                     break;
                 }
             }
@@ -247,6 +254,13 @@ void CFG::build_blocks(Function& func, const DOLFile& dol) {
                 } else if (insn.type == PPCInsnType::BCLR && !insn.link) {
                     // Conditional return — terminates block
                     block.is_return = true;
+                } else if (insn.type == PPCInsnType::BCCTR && !insn.link) {
+                    // Switch table — resolve targets and wire as successors
+                    auto jt_targets = detect_jump_table(func, pc, dol);
+                    block.jump_table_targets = jt_targets;
+                    for (uint32_t target : jt_targets) {
+                        block.successors.push_back(target);
+                    }
                 }
                 pc += 4;
                 break;
@@ -266,6 +280,131 @@ void CFG::build_blocks(Function& func, const DOLFile& dol) {
             }
         }
     }
+}
+
+// Detect jump tables by backscanning from a bctr instruction.
+// Looks for the classic GCC pattern:
+//   cmplwi rX, N          (bounds check: N = table size)
+//   bc     ...            (branch if out of bounds)
+//   lis    rY, hi(table)  (load table base high)
+//   addi   rY, rY, lo(table) or ori rY, rY, lo(table)
+//   rlwinm rZ, rX, 2, 0, 29  (index * 4)
+//   lwzx   rZ, rY, rZ    (load target address)
+//   mtctr  rZ             (move to CTR)
+//   bctr                  (dispatch)
+//
+// Inspired by ExpansionPak/GCRecompiler's jump table detection approach.
+std::vector<uint32_t> CFG::detect_jump_table(const Function& func, uint32_t bctr_addr, const DOLFile& dol) {
+    std::vector<uint32_t> targets;
+
+    // Collect instructions leading up to bctr (up to 12 instructions back)
+    std::vector<PPCInsn> window;
+    for (const auto& [addr, block] : func.blocks) {
+        for (const auto& insn : block.instructions) {
+            window.push_back(insn);
+        }
+    }
+
+    // Find the bctr in the window
+    int bctr_idx = -1;
+    for (int i = 0; i < (int)window.size(); i++) {
+        if (window[i].address == bctr_addr) {
+            bctr_idx = i;
+            break;
+        }
+    }
+    if (bctr_idx < 0) return targets;
+
+    // Backscan for mtctr, lwzx, lis+addi/ori (table base), cmplwi (bounds)
+    uint32_t table_base = 0;
+    uint32_t table_count = 0;
+    bool found_mtctr = false;
+    bool found_lwzx = false;
+    bool found_base = false;
+    bool found_bounds = false;
+    uint32_t lis_hi = 0;
+    uint32_t base_reg = 0;
+
+    int scan_start = (bctr_idx > 12) ? bctr_idx - 12 : 0;
+    for (int i = bctr_idx - 1; i >= scan_start; i--) {
+        const PPCInsn& insn = window[i];
+        uint32_t op = PPC_OP(insn.raw);
+        uint32_t xo = PPC_XO(insn.raw);
+
+        // mtctr rZ (mtspr 9, rZ) — opcode 31, XO 467, SPR 9
+        if (op == 31 && xo == 467 && PPC_SPR(insn.raw) == 9) {
+            found_mtctr = true;
+            continue;
+        }
+
+        // lwzx rD, rA, rB — opcode 31, XO 23
+        if (op == 31 && xo == 23) {
+            found_lwzx = true;
+            base_reg = PPC_RA(insn.raw);
+            continue;
+        }
+
+        // lis rD, imm (addis rD, 0, imm) — opcode 15, rA=0
+        if (op == 15 && PPC_RA(insn.raw) == 0) {
+            lis_hi = (uint32_t)(int16_t)(insn.raw & 0xFFFF) << 16;
+            continue;
+        }
+
+        // addi rD, rA, imm — opcode 14 (completes lis+addi pair)
+        if (op == 14 && lis_hi != 0) {
+            table_base = lis_hi + (int16_t)(insn.raw & 0xFFFF);
+            found_base = true;
+            continue;
+        }
+
+        // ori rD, rA, imm — opcode 24 (alternate: lis+ori pair)
+        if (op == 24 && lis_hi != 0) {
+            table_base = lis_hi | (insn.raw & 0xFFFF);
+            found_base = true;
+            continue;
+        }
+
+        // cmplwi rA, imm (cmpli crfD, 0, rA, UIMM) — opcode 10
+        if (op == 10) {
+            table_count = insn.raw & 0xFFFF;
+            found_bounds = true;
+            continue;
+        }
+
+        // cmpwi rA, imm (cmpi crfD, 0, rA, SIMM) — opcode 11
+        if (op == 11) {
+            table_count = (uint32_t)(int16_t)(insn.raw & 0xFFFF);
+            found_bounds = true;
+            continue;
+        }
+    }
+
+    if (!found_mtctr || !found_lwzx || !found_base || !found_bounds) {
+        return targets;
+    }
+
+    // Sanity check: table count should be reasonable
+    if (table_count == 0 || table_count > 512) {
+        return targets;
+    }
+
+    // Read the jump table entries from the DOL
+    // The bounds check is typically "cmplwi rX, N" where N is the number of cases
+    // (the branch skips the table if index >= N, so we have N+1 entries including case 0..N-1)
+    printf("[CFG] Detected jump table at 0x%08X: base=0x%08X, %u entries (bctr at 0x%08X)\n",
+           table_base, table_base, table_count, bctr_addr);
+
+    for (uint32_t i = 0; i < table_count; i++) {
+        uint32_t entry_addr = table_base + i * 4;
+        uint32_t target = dol.read32(entry_addr);
+        if (target == 0) continue;
+        if (dol.is_code(target)) {
+            targets.push_back(target);
+        }
+    }
+
+    printf("[CFG] Resolved %zu jump table targets\n", targets.size());
+    return targets;
 }
 
 void CFG::print_stats() const {

@@ -978,10 +978,15 @@ namespace gcrecomp {
             if (insn.link) {
                 emit("ctx->lr = 0x%08Xu; CALL_INDIRECT(ctx->ctr, ctx, mem); // bctrl", insn.address + 4);
             } else {
-                // Switch table: dispatch to a label within this function based on CTR value
-                emit("// bctr -- switch table dispatch");
+                // Switch table: use resolved jump table targets if available,
+                // otherwise fall back to all block addresses in this function.
+                // Jump table detection based on approach from ExpansionPak/GCRecompiler.
+                const auto& targets = current_block->jump_table_targets.empty()
+                    ? block_addrs : current_block->jump_table_targets;
+                emit("// bctr -- switch table dispatch%s",
+                     current_block->jump_table_targets.empty() ? " (unresolved)" : "");
                 emit("switch (ctx->ctr) {");
-                for (uint32_t addr : block_addrs) {
+                for (uint32_t addr : targets) {
                     emit("    case 0x%08Xu: goto label_%08X;", addr, addr);
                 }
                 emit("    default: CALL_INDIRECT(ctx->ctr, ctx, mem); break; // fallback: tail call");
