@@ -228,12 +228,50 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
     p[3] = (uint8_t)val;
 }
 
+// 16-bit HW register HLE — covers DSP/AI ports which are 16-bit-addressable.
+// Pattern: game writes "start" bits (reset, DMA, transfer-in-progress) and
+// then polls the same register until those bits clear. Real hardware clears
+// them when the operation completes; without device emulation we just clear
+// them immediately so the poll exits.
+static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
+    static std::unordered_map<uint32_t, int> hw_w16_count;
+    int& count = hw_w16_count[addr];
+    if (count < 3) {
+        printf("[HW] Write16 0x%08X = 0x%04X\n", addr, val);
+        fflush(stdout);
+    }
+    count++;
+
+    // DSP Control/Status Register (0xCC00500A, 16-bit).
+    // Self-clearing bits: RES (0x0001), DSP_DMA (0x0200), AR_DMA bits etc.
+    // libogc names (dsp.h):
+    //   0x0001 RES      — reset DSP, clears when reset completes
+    //   0x0002 PIINT    — assert pending interrupt
+    //   0x0200 DSPDMA   — DMA in progress
+    if (addr == 0xCC00500A) {
+        val &= ~0x0001u;  // RES — instantly "done"
+        val &= ~0x0200u;  // DSPDMA — instantly "transfer complete"
+    }
+
+    // AR DMA Count (0xCC005028 high, 0xCC00502A low) — auxiliary RAM DMA
+    // length register. When written, ARAM DMA starts and bit 0x0200 in
+    // DSPCR stays set until completion. Already handled by DSPDMA clear above.
+
+    uint8_t* p = mem->hw_regs + (addr - Memory::HW_REG_BASE);
+    p[0] = (uint8_t)(val >> 8);
+    p[1] = (uint8_t)val;
+}
+
 // Big-endian writes
 void Memory::write8(uint32_t addr, uint8_t val) {
     *translate(addr) = val;
 }
 
 void Memory::write16(uint32_t addr, uint16_t val) {
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        hw_write16_hle(this, addr, val);
+        return;
+    }
     uint8_t* p = translate(addr);
     p[0] = (uint8_t)(val >> 8);
     p[1] = (uint8_t)val;
