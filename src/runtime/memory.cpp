@@ -95,6 +95,26 @@ uint8_t Memory::read8(uint32_t addr) const {
 }
 
 uint16_t Memory::read16(uint32_t addr) const {
+    // Spin-detection: when a HW reg is read >100K times in a row from
+    // the same address, the game is polling for something. Print the
+    // value so we can identify which bits it expects to change.
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        static uint32_t last_addr = 0;
+        static uint64_t same_count = 0;
+        if (addr == last_addr) {
+            same_count++;
+            if (same_count == 100000 || (same_count > 100000 && (same_count & 0xFFFFFF) == 0)) {
+                const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+                uint16_t v = ((uint16_t)p[0] << 8) | p[1];
+                printf("[Poll] Read16 0x%08X (count %llu) = 0x%04X\n",
+                       addr, (unsigned long long)same_count, v);
+                fflush(stdout);
+            }
+        } else {
+            last_addr = addr;
+            same_count = 1;
+        }
+    }
     const uint8_t* p = translate(addr);
     return ((uint16_t)p[0] << 8) | p[1];
 }
@@ -200,6 +220,17 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
     if (count == 100 || count == 1000 || count == 10000) {
         printf("[HW] Write32 0x%08X hit %d times\n", addr, count);
         fflush(stdout);
+    }
+
+    // ARAM DMA registers — when the game writes AR_DMA_CNT it kicks off
+    // an ARAM<->main-RAM DMA transfer. The DSPCR's ARINT bit (0x0020)
+    // sets when the transfer completes. With no DSP/ARAM emulation we
+    // signal "done" immediately by setting ARINT in DSPCR.
+    // Some games write AR_DMA_CNT as 32-bit, some as 16-bit halves;
+    // catch both the high (0x5028) and the canonical low (0x502A) names.
+    if (addr == 0xCC005028 || addr == 0xCC00502A) {
+        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
+        dspcr_p[1] |= 0x20; // ARINT
     }
 
     // EXI DMA Control Register: when TSTART (bit 0) is set, immediately
