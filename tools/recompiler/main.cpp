@@ -40,6 +40,8 @@ static void print_usage(const char* prog) {
     printf("  --project <name>     Project name in file headers\n");
     printf("  --info               Print DOL info and exit\n");
     printf("  --stats              Print CFG statistics and exit\n");
+    printf("  --trace              Emit TRACE_ENTER(addr) at every function entry\n");
+    printf("                       (records calls in gcrecomp's trace ring)\n");
     printf("  --help               Show this help\n");
 }
 
@@ -58,6 +60,7 @@ int main(int argc, char** argv) {
     int funcs_per_file = 200;
     bool info_only = false;
     bool stats_only = false;
+    bool trace = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
@@ -76,6 +79,8 @@ int main(int argc, char** argv) {
             info_only = true;
         } else if (strcmp(argv[i], "--stats") == 0) {
             stats_only = true;
+        } else if (strcmp(argv[i], "--trace") == 0) {
+            trace = true;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -177,6 +182,13 @@ int main(int argc, char** argv) {
             fprintf(common, "#define MEM_WRITEF64(addr, val) g_mem.writef64(static_cast<uint32_t>(addr), static_cast<double>(val))\n\n");
             fprintf(common, "// Indirect call macro\n");
             fprintf(common, "#define CALL_INDIRECT(addr, ctx, mem) g_func_table.call(static_cast<uint32_t>(addr), ctx, mem)\n\n");
+            if (trace) {
+                fprintf(common, "// Function-entry trace (--trace was passed to gcrecomp_recompiler)\n");
+                fprintf(common, "#define TRACE_ENTER(addr) gcrecomp::trace_enter(static_cast<uint32_t>(addr))\n\n");
+            } else {
+                fprintf(common, "// Function-entry trace disabled (rebuild with --trace to enable)\n");
+                fprintf(common, "#define TRACE_ENTER(addr) ((void)0)\n\n");
+            }
             fprintf(common, "// PSQ wrapper macros (delegate to gcrecomp runtime helpers with g_mem)\n");
             fprintf(common, "#define PSQ_LOAD_ONE(addr, gqr)              psq_load_one(g_mem, static_cast<uint32_t>(addr), gqr)\n");
             fprintf(common, "#define PSQ_LOAD_PAIR(ps0, ps1, addr, gqr)   psq_load_pair(g_mem, ps0, ps1, static_cast<uint32_t>(addr), gqr)\n");
@@ -237,6 +249,9 @@ int main(int argc, char** argv) {
 
         fprintf(current_file, "\n// ---- %s @ 0x%08X ----\n", func.name.c_str(), addr);
         fprintf(current_file, "void %s(PPCContext* ctx, Memory* mem) {\n", func.name.c_str());
+        if (trace) {
+            fprintf(current_file, "    TRACE_ENTER(0x%08Xu);\n", addr);
+        }
 
         PPCToCEmitter emitter(current_file);
         emitter.block_addrs = func.block_addrs;
