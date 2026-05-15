@@ -814,6 +814,16 @@ const GXState& GXGetState();
 /// @param projection Output 4x4 projection matrix (row-major)
 void GXGetMatrices(float model_view[4][4], float projection[4][4]);
 
+/// Read back a 3x4 matrix slot the game wrote via GXLoadPosMtxImm.
+/// Used by the host renderer to recover the game's view matrix instead of
+/// computing one externally. Returns false if the slot has never been written.
+bool GXGetMatrixSlot(uint32_t id, float out[3][4]);
+
+/// Per-slot global write counter, bumped every time GXLoadPosMtxImm hits the
+/// slot. 0 means "never written". Useful for "is the game still updating
+/// this slot?" checks each frame.
+uint64_t GXGetMatrixWriteCounter(uint32_t id);
+
 /// Initialize the D3D11 shader subsystem (compile vertex shader, create input layout).
 /// Called once during GXInitBackend.
 /// @param device The D3D11 device (ID3D11Device* cast to void*)

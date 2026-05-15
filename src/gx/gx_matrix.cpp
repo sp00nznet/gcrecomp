@@ -27,8 +27,28 @@ static float g_pos_matrix[4][4];
 // Projection matrix
 static float g_proj_matrix[4][4];
 
+// Per-slot frame counter for diagnostic: bump when a slot is written so the
+// host can tell which slots the game touched recently.
+static uint64_t g_matrix_write_counter[64];
+static uint64_t g_matrix_global_counter;
+
 void GXLoadPosMtxImm(const float mtx[3][4], uint32_t id) {
-    memcpy(&g_matrix_mem[id * 4], mtx, 12 * sizeof(float));
+    if (id < 64) {
+        memcpy(&g_matrix_mem[id * 4], mtx, 12 * sizeof(float));
+        g_matrix_write_counter[id] = ++g_matrix_global_counter;
+    }
+}
+
+// Read back a slot the game wrote (3x4). Returns true if the slot has been
+// written at least once. Used by host renderer to pull the game's view matrix.
+bool GXGetMatrixSlot(uint32_t id, float out[3][4]) {
+    if (id >= 64 || g_matrix_write_counter[id] == 0) return false;
+    memcpy(out, &g_matrix_mem[id * 4], 12 * sizeof(float));
+    return true;
+}
+
+uint64_t GXGetMatrixWriteCounter(uint32_t id) {
+    return (id < 64) ? g_matrix_write_counter[id] : 0;
 }
 
 void GXSetCurrentMtx(uint32_t id) {
