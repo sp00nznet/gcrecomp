@@ -37,6 +37,13 @@ FuncTable g_func_table;
 TraceRing            g_trace_ring;
 std::atomic<bool>    g_trace_enabled{false};
 
+void trace_enter(uint32_t addr) {
+    if (g_trace_enabled.load(std::memory_order_relaxed)) {
+        uint64_t p = g_trace_ring.pos.fetch_add(1, std::memory_order_relaxed);
+        g_trace_ring.entries[p & (TraceRing::SIZE - 1)] = addr;
+    }
+}
+
 void trace_set_enabled(bool on) {
     g_trace_enabled.store(on, std::memory_order_release);
     printf("[Trace] %s — recompiled function entries %s recorded\n",

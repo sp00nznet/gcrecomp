@@ -319,12 +319,10 @@ struct TraceRing {
 extern TraceRing  g_trace_ring;
 extern std::atomic<bool> g_trace_enabled;
 
-inline void trace_enter(uint32_t addr) {
-    if (g_trace_enabled.load(std::memory_order_relaxed)) {
-        uint64_t p = g_trace_ring.pos.fetch_add(1, std::memory_order_relaxed);
-        g_trace_ring.entries[p & (TraceRing::SIZE - 1)] = addr;
-    }
-}
+// Out-of-line definition (not inline) so the compiler can't elide the call
+// or fold trace_enter chains across recompiled-code TUs. The atomic load
+// cost is dominated by the call overhead at this point.
+void trace_enter(uint32_t addr);
 
 void trace_set_enabled(bool on);
 void trace_dump_recent(size_t n);
