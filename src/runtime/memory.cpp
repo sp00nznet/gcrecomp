@@ -52,6 +52,14 @@ void Memory::shutdown() {
 }
 
 uint8_t* Memory::translate(uint32_t addr) {
+    // Heartbeat: prove the recompiled CPU is making forward progress.
+    // Fires every 16M memory ops (~once per second for typical code).
+    static uint64_t op_count = 0;
+    if ((++op_count & 0xFFFFFF) == 0) {
+        printf("[HB] %llu mem ops, last addr 0x%08X\n",
+               (unsigned long long)op_count, addr);
+        fflush(stdout);
+    }
     // Cached region: 0x80000000 - 0x80000000+ram_size
     if (addr >= MAIN_RAM_BASE && addr < ram_end) {
         return ram + (addr - MAIN_RAM_BASE);
