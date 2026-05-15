@@ -243,19 +243,30 @@ static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
     count++;
 
     // DSP Control/Status Register (0xCC00500A, 16-bit).
-    // Self-clearing bits: RES (0x0001), DSP_DMA (0x0200), AR_DMA bits etc.
-    // libogc names (dsp.h):
-    //   0x0001 RES      — reset DSP, clears when reset completes
-    //   0x0002 PIINT    — assert pending interrupt
-    //   0x0200 DSPDMA   — DMA in progress
+    // Self-clearing bits: RES (0x0001), DSP_DMA (0x0200).
     if (addr == 0xCC00500A) {
-        val &= ~0x0001u;  // RES — instantly "done"
-        val &= ~0x0200u;  // DSPDMA — instantly "transfer complete"
+        val &= ~0x0001u;  // RES — DSP reset completes instantly
+        val &= ~0x0200u;  // DSPDMA — DSP DMA "transfer complete"
     }
 
-    // AR DMA Count (0xCC005028 high, 0xCC00502A low) — auxiliary RAM DMA
-    // length register. When written, ARAM DMA starts and bit 0x0200 in
-    // DSPCR stays set until completion. Already handled by DSPDMA clear above.
+    // DSP Mailbox From CPU High (0xCC005004): bit 15 (0x8000) is the
+    // "message pending" status flag. The game writes the high half with
+    // 0x8000 set to signal "new message", then polls until the DSP
+    // (here, us) clears it. Without DSP emulation, clear it immediately
+    // so the message "send" loop exits.
+    if (addr == 0xCC005004) {
+        val &= ~0x8000u;
+    }
+
+    // AR DMA Count (0xCC005028/0xCC00502A) — when written, the ARAM DMA
+    // starts. DSPCR's ARINT bit (0x0020) sets when DMA completes; for
+    // emulated boot we tell the game "DMA already done" by setting ARINT
+    // in DSPCR's stored value.
+    if (addr == 0xCC005028 || addr == 0xCC00502A) {
+        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
+        // DSPCR is 16-bit big-endian; bit 5 = ARINT in the low byte.
+        dspcr_p[1] |= 0x20;
+    }
 
     uint8_t* p = mem->hw_regs + (addr - Memory::HW_REG_BASE);
     p[0] = (uint8_t)(val >> 8);
