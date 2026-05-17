@@ -36,6 +36,17 @@ namespace gcrecomp {
         va_end(args);
     }
 
+    std::string PPCToCEmitter::name_for(uint32_t addr) const {
+        if (func_map) {
+            auto it = func_map->find(addr);
+            if (it != func_map->end() && !it->second.name.empty())
+                return it->second.name;
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "func_%08X", addr);
+        return buf;
+    }
+
     void PPCToCEmitter::emit_insn(const PPCInsn& insn) {
         // Comment with original instruction
         emit("// 0x%08X: %s", insn.address, insn.mnemonic.c_str());
@@ -641,18 +652,18 @@ namespace gcrecomp {
                  insn.rd, insn.rb, insn.rd, insn.rd);
             break;
         case PPCInsnType::FCTIWZ:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; memcpy(&ctx->f[%u], &tmp, 8); }",
+            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
                  insn.rb, insn.rd);
             break;
         case PPCInsnType::FCTIW:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; memcpy(&ctx->f[%u], &tmp, 8); }",
+            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
                  insn.rb, insn.rd);
             break;
         case PPCInsnType::MFFS:
-            emit("{ uint64_t v = (uint64_t)ctx->fpscr; memcpy(&ctx->f[%u], &v, 8); }", insn.rd);
+            emit("{ uint64_t v = (uint64_t)ctx->fpscr; std::memcpy(&ctx->f[%u], &v, 8); }", insn.rd);
             break;
         case PPCInsnType::MTFSF:
-            emit("{ uint64_t v; memcpy(&v, &ctx->f[%u], 8); ctx->fpscr = (uint32_t)v; }", insn.rb);
+            emit("{ uint64_t v; std::memcpy(&v, &ctx->f[%u], 8); ctx->fpscr = (uint32_t)v; }", insn.rb);
             break;
 
         // ==== Float Compare ====
@@ -901,7 +912,16 @@ namespace gcrecomp {
         // ==== Branch ====
         case PPCInsnType::B:
             if (insn.link) {
-                emit("ctx->lr = 0x%08Xu; func_%08X(ctx, mem); // bl", insn.address + 4, insn.branch_target);
+                bool known = func_map && func_map->find(insn.branch_target) != func_map->end();
+                if (known) {
+                    emit("ctx->lr = 0x%08Xu; %s(ctx, mem); // bl", insn.address + 4, name_for(insn.branch_target).c_str());
+                } else {
+                    // Target not in CFG (e.g., `bla 0x60` into a low/vector address).
+                    // Route through the function table so it becomes a runtime
+                    // unresolved-call rather than a link-time error.
+                    emit("ctx->lr = 0x%08Xu; CALL_INDIRECT(0x%08Xu, ctx, mem); // bl (unresolved target)",
+                         insn.address + 4, insn.branch_target);
+                }
             } else {
                 emit("goto label_%08X; // b", insn.branch_target);
             }
@@ -1032,7 +1052,7 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::DCBZ:
-            emit("memset((void*)((uintptr_t)mem->translate(ctx->r[%u] + ctx->r[%u]) & ~31), 0, 32); // dcbz",
+            emit("std::memset((void*)((uintptr_t)mem->translate(ctx->r[%u] + ctx->r[%u]) & ~31), 0, 32); // dcbz",
                  insn.ra, insn.rb);
             break;
 

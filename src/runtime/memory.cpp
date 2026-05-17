@@ -22,6 +22,7 @@
 // =============================================================================
 
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/interrupts.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +60,15 @@ uint8_t* Memory::translate(uint32_t addr) {
         printf("[HB] %llu mem ops, last addr 0x%08X\n",
                (unsigned long long)op_count, addr);
         fflush(stdout);
+    }
+
+    // Interrupt delivery: poll the periodic scheduler every 256K ops.
+    // The scheduler returns early unless its deadline has elapsed, so this
+    // is cheap on the steady-state path. We pass &g_ctx because we don't
+    // have access to the current ctx here — the recompiled code uses
+    // g_ctx directly (see recomp_common.h's using-declarations).
+    if ((op_count & 0x3FFFF) == 0) {
+        g_interrupts.tick(&g_ctx, this);
     }
     // Cached region: 0x80000000 - 0x80000000+ram_size
     if (addr >= MAIN_RAM_BASE && addr < ram_end) {
@@ -106,8 +116,8 @@ uint16_t Memory::read16(uint32_t addr) const {
             if (same_count == 100000 || (same_count > 100000 && (same_count & 0xFFFFFF) == 0)) {
                 const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
                 uint16_t v = ((uint16_t)p[0] << 8) | p[1];
-                printf("[Poll] Read16 0x%08X (count %llu) = 0x%04X\n",
-                       addr, (unsigned long long)same_count, v);
+                printf("[Poll] Read16 0x%08X (count %llu) = 0x%04X  LR=0x%08X\n",
+                       addr, (unsigned long long)same_count, v, g_ctx.lr);
                 fflush(stdout);
             }
         } else {
@@ -115,6 +125,31 @@ uint16_t Memory::read16(uint32_t addr) const {
             same_count = 1;
         }
     }
+
+    // DSP -> CPU mailbox HIGH (0xCC005004): bit 15 (0x8000) is the
+    // "DSP has a message for the CPU" flag. With no DSP emulation we
+    // simulate the protocol: the *first* read returns the stored value
+    // (so the OS init "wait until mailbox is empty" poll exits when bit 15
+    // is naturally 0), and every subsequent read returns the stored value
+    // OR'd with 0x8000 (so the "wait until DSP responds" poll exits too).
+    // The OS reads the LOW half (0xCC005006) right after, which we use as
+    // the "message consumed" signal to reset bit 15 for the next cycle.
+    if (addr == 0xCC005004) {
+        static int read_count = 0;
+        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+        uint16_t v = ((uint16_t)p[0] << 8) | p[1];
+        if (read_count++ > 0) v |= 0x8000;
+        return v;
+    }
+    if (addr == 0xCC005006) {
+        // Mark the message as consumed — next 5004 read returns the raw value
+        // (bit 15 == 0) so a subsequent outbound cycle's "wait for clear"
+        // poll exits. Then increment read counter on next 5004 read flips
+        // bit 15 back on. (Effectively: each 5006 read primes a fresh cycle.)
+        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+        return ((uint16_t)p[0] << 8) | p[1];
+    }
+
     const uint8_t* p = translate(addr);
     return ((uint16_t)p[0] << 8) | p[1];
 }

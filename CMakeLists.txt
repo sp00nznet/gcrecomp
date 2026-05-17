@@ -38,6 +38,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/runtime/ppc_context.cpp
         src/runtime/memory.cpp
         src/runtime/func_table.cpp
+        src/runtime/interrupts.cpp
         src/os/os_funcs.cpp
         src/os/yaz0.cpp
         src/os/rarc.cpp
