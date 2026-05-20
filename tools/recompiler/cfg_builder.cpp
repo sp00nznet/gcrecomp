@@ -91,6 +91,70 @@ void CFG::scan_targets(const DOLFile& dol) {
     }
     printf("[CFG] Phase 1.6: Found %zu additional targets from prologue scan (%zu total)\n",
            call_targets.size() - before, call_targets.size());
+
+    // Phase 1.7: Scan text for `lis rD, hi` / `addi rD, rD, lo` and
+    // `lis rD, hi` / `ori rD, rD, lo` pairs that materialize a 32-bit
+    // absolute address. Catches function pointers stored in tables that
+    // get loaded into registers at runtime (vtables, jump tables, callback
+    // registries) which Phase 1.5's static data scan can miss when the
+    // pointer is computed rather than stored.
+    //
+    // PPC encoding:
+    //   lis  rD, imm     = 0x3C00_0000 | (rD<<21) | imm16    (opcode 15, rA=0)
+    //   addi rD, rA, simm= 0x3800_0000 | (rD<<21) | (rA<<16) | imm16 (opcode 14)
+    //   ori  rA, rS, imm = 0x6000_0000 | (rS<<21) | (rA<<16) | imm16 (opcode 24)
+    before = call_targets.size();
+    auto extract_reg = [](uint32_t raw, int shift) -> uint32_t {
+        return (raw >> shift) & 0x1F;
+    };
+    for (const auto& sec : dol.sections) {
+        if (!sec.is_text) continue;
+        // Need at least 8 bytes for a pair.
+        for (uint32_t off = 0; off + 8 <= sec.size; off += 4) {
+            const uint8_t* p1 = sec.data.data() + off;
+            uint32_t i1 = ((uint32_t)p1[0] << 24) | ((uint32_t)p1[1] << 16) |
+                          ((uint32_t)p1[2] << 8) | p1[3];
+            // lis: primary opcode 15, rA == 0 (so addis becomes lis).
+            // 0x3C = primary opcode 15 with the high register bit cleared
+            // (rA hidden in low 5 bits of 1st byte must be 0).
+            if ((i1 & 0xFC1F0000u) != 0x3C000000u) continue;
+            uint32_t hi_reg = extract_reg(i1, 21);
+            uint32_t hi_imm = i1 & 0xFFFFu;
+
+            const uint8_t* p2 = sec.data.data() + off + 4;
+            uint32_t i2 = ((uint32_t)p2[0] << 24) | ((uint32_t)p2[1] << 16) |
+                          ((uint32_t)p2[2] << 8) | p2[3];
+
+            uint32_t lo_simm   = i2 & 0xFFFFu;
+            uint32_t addr      = 0;
+            bool     matched   = false;
+
+            uint32_t op2  = i2 >> 26;
+            uint32_t lo_rD = extract_reg(i2, 21);
+            uint32_t lo_rA = extract_reg(i2, 16);
+
+            // addi rD, rD, lo with rD == hi_reg, rA == hi_reg
+            // (opcode 14 = 0x38000000)
+            if (op2 == 14 && lo_rD == hi_reg && lo_rA == hi_reg) {
+                int32_t signed_lo = (int32_t)(int16_t)lo_simm;
+                addr = (hi_imm << 16) + (uint32_t)signed_lo;
+                matched = true;
+            }
+            // ori rD, rS, lo with rD == rS == hi_reg
+            // (opcode 24 = 0x60000000)
+            else if (op2 == 24 && lo_rA == hi_reg && lo_rD == hi_reg) {
+                addr = (hi_imm << 16) | lo_simm;
+                matched = true;
+            }
+
+            if (matched && (addr & 3u) == 0 && dol.is_code(addr)) {
+                call_targets.insert(addr);
+            }
+        }
+    }
+    printf("[CFG] Phase 1.7: Found %zu additional targets from "
+           "lis/addi+ori pair scan (%zu total)\n",
+           call_targets.size() - before, call_targets.size());
 }
 
 void CFG::build_functions(const DOLFile& dol) {
