@@ -99,6 +99,13 @@ struct RELFile {
     std::string                name;
 
     bool load(const std::string& path);
+
+    // Parse from an in-memory buffer (e.g. read off disc into a vector).
+    // Useful when the REL is inside a mounted ISO rather than a standalone
+    // file. Same semantics as load(path).
+    bool load_from_buffer(const uint8_t* data, size_t size,
+                          const std::string& name_hint = "");
+
     void print_info() const;
 };
 

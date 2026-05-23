@@ -51,6 +51,22 @@ bool RELFile::load(const std::string& path) {
         return false;
     }
     fclose(fp);
+    return load_from_buffer(buf.data(), buf.size(), path);
+}
+
+bool RELFile::load_from_buffer(const uint8_t* data, size_t size,
+                                const std::string& name_hint) {
+    if (size < 0x40 || !data) {
+        fprintf(stderr, "[REL] buffer too small (%zu bytes) [%s]\n",
+                size, name_hint.c_str());
+        return false;
+    }
+    // Treat input as the buffer body for the parsing code below; the
+    // original load(path) path expected a std::vector<uint8_t>. Adapt by
+    // wrapping a span-like view via local variables.
+    const std::vector<uint8_t> buf(data, data + size);
+    const long fsize_l = (long)size;
+    const std::string path = name_hint;  // for log messages
 
     // ---- Parse header ----
     const uint8_t* h = buf.data();
