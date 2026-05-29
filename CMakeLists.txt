@@ -89,12 +89,15 @@ endif()
 # ===========================================================================
 if(GCRECOMP_BUILD_TOOLS)
     # Static library for shared tool code (DOL parser, disassembler, CFG, codegen, symbols)
+    # Includes REL + Yaz0 from src/os so the recompiler can take a REL input.
     add_library(gcrecomp_tools STATIC
         tools/recompiler/dol_parser.cpp
         tools/recompiler/ppc_disasm.cpp
         tools/recompiler/cfg_builder.cpp
         tools/recompiler/ppc_to_c.cpp
         tools/recompiler/symbol_map.cpp
+        src/os/rel.cpp
+        src/os/yaz0.cpp
     )
     target_include_directories(gcrecomp_tools PUBLIC include)
 

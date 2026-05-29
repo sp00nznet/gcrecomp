@@ -19,11 +19,14 @@
 #include "gcrecomp/cfg.h"
 #include "gcrecomp/symbol_map.h"
 #include "gcrecomp/ppc_to_c.h"
+#include "gcrecomp/rel.h"
+#include "gcrecomp/yaz0.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <fstream>
 
 using namespace gcrecomp;
 
@@ -40,7 +43,57 @@ static void print_usage(const char* prog) {
     printf("  --project <name>     Project name in file headers\n");
     printf("  --info               Print DOL info and exit\n");
     printf("  --stats              Print CFG statistics and exit\n");
+    printf("  --rel <path>         Recompile a REL module (instead of DOL).\n");
+    printf("                       Input path is the .rel file; positional\n");
+    printf("                       arg is the host DOL used to resolve\n");
+    printf("                       module_id==0 references.\n");
+    printf("  --rel-base <addr>    Load address for REL sections (default 0x82000000)\n");
+    printf("  --rel-name <name>    Output basename (default: REL file stem)\n");
     printf("  --help               Show this help\n");
+}
+
+// Read whole file into a vector. Yaz0-aware: if file starts with "Yaz0",
+// decompresses in-place and returns the decompressed buffer.
+static bool slurp_maybe_yaz0(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        fprintf(stderr, "Failed to open %s\n", path.c_str());
+        return false;
+    }
+    f.seekg(0, std::ios::end);
+    size_t sz = (size_t)f.tellg();
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(sz);
+    f.read(reinterpret_cast<char*>(buf.data()), sz);
+    if (sz >= 4 && buf[0] == 'Y' && buf[1] == 'a' && buf[2] == 'z' && buf[3] == '0') {
+        uint32_t out_sz = (uint32_t(buf[4]) << 24) | (uint32_t(buf[5]) << 16) |
+                          (uint32_t(buf[6]) << 8)  |  uint32_t(buf[7]);
+        std::vector<uint8_t> dec(out_sz);
+        if (!gcrecomp::yaz0_decompress(buf.data(), buf.size(),
+                                        dec.data(), dec.size())) {
+            fprintf(stderr, "Yaz0 decompress failed for %s\n", path.c_str());
+            return false;
+        }
+        out = std::move(dec);
+    } else {
+        out = std::move(buf);
+    }
+    return true;
+}
+
+// Derive a clean basename from a REL path (no dir, no extension, no
+// non-identifier chars).
+static std::string sanitize_name(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    std::string stem = (slash == std::string::npos) ? path
+                                                    : path.substr(slash + 1);
+    size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos) stem.resize(dot);
+    for (auto& c : stem) {
+        if (!(isalnum((unsigned char)c) || c == '_')) c = '_';
+    }
+    if (stem.empty()) stem = "rel";
+    return stem;
 }
 
 int main(int argc, char** argv) {
@@ -55,6 +108,9 @@ int main(int argc, char** argv) {
     std::string extra_funcs_path;
     std::string output_dir = "recompiled";
     std::string project_name = "gcrecomp";
+    std::string rel_path;
+    std::string rel_name;
+    uint32_t    rel_base = 0x82000000u;
     int funcs_per_file = 200;
     bool info_only = false;
     bool stats_only = false;
@@ -76,6 +132,12 @@ int main(int argc, char** argv) {
             info_only = true;
         } else if (strcmp(argv[i], "--stats") == 0) {
             stats_only = true;
+        } else if (strcmp(argv[i], "--rel") == 0 && i + 1 < argc) {
+            rel_path = argv[++i];
+        } else if (strcmp(argv[i], "--rel-base") == 0 && i + 1 < argc) {
+            rel_base = (uint32_t)strtoul(argv[++i], nullptr, 0);
+        } else if (strcmp(argv[i], "--rel-name") == 0 && i + 1 < argc) {
+            rel_name = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -93,15 +155,48 @@ int main(int argc, char** argv) {
     printf("\n  gcrecomp Static Recompiler\n");
     printf("  Gekko PowerPC 750CXe -> Native C\n\n");
 
-    DOLFile dol;
+    DOLFile host_dol;
     printf("[*] Loading DOL: %s\n", dol_path.c_str());
-    if (!dol.load(dol_path)) {
+    if (!host_dol.load(dol_path)) {
         fprintf(stderr, "Failed to load DOL file\n");
         return 1;
     }
-    dol.print_info();
+    host_dol.print_info();
 
     if (info_only) return 0;
+
+    // ---- REL mode: replace the working DOL with a REL-derived view ----
+    // The recompilation pipeline below works on a DOLFile reference. When
+    // --rel is set, we load + decompress the REL, apply relocations, and
+    // build a DOLFile that contains only the REL's sections. The host DOL
+    // is consulted for module_id==0 references during relocation.
+    DOLFile rel_view_dol;
+    DOLFile* dol_ptr = &host_dol;  // default
+    RELFile  rel;
+    bool     rel_mode = !rel_path.empty();
+    if (rel_mode) {
+        printf("[*] Loading REL: %s (base=0x%08X)\n",
+               rel_path.c_str(), rel_base);
+        std::vector<uint8_t> rel_bytes;
+        if (!slurp_maybe_yaz0(rel_path, rel_bytes)) return 1;
+        if (!rel.load_from_buffer(rel_bytes.data(), rel_bytes.size(),
+                                   rel_path)) {
+            fprintf(stderr, "REL parse failed\n");
+            return 1;
+        }
+        rel.print_info();
+        if (!rel_to_dol(rel, rel_base, &host_dol, rel_view_dol)) {
+            fprintf(stderr, "REL → DOL conversion failed\n");
+            return 1;
+        }
+        printf("[*] REL mapped: sections=%zu memory_base=0x%08X memory_end=0x%08X "
+               "entry=0x%08X\n",
+               rel_view_dol.sections.size(), rel_view_dol.memory_base,
+               rel_view_dol.memory_end, rel_view_dol.entry_point);
+        dol_ptr = &rel_view_dol;
+        if (rel_name.empty()) rel_name = sanitize_name(rel_path);
+    }
+    DOLFile& dol = *dol_ptr;
 
     // ---- Load symbols ----
     SymbolMap syms;
@@ -149,8 +244,9 @@ int main(int argc, char** argv) {
     int func_count = 0;
     FILE* current_file = nullptr;
 
-    // Generate recomp_common.h — shared macros and includes for all recompiled code
-    {
+    // Generate recomp_common.h — shared macros and includes for all recompiled code.
+    // In REL mode we don't regenerate this; the DOL recompile already produced it.
+    if (!rel_mode) {
         char path[512];
         snprintf(path, sizeof(path), "%s/recomp_common.h", output_dir.c_str());
         FILE* common = fopen(path, "w");
@@ -186,8 +282,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Generate forward declarations header
-    {
+    // ---- Assign function names (used by both DOL and REL emit paths) ----
+    for (auto& [addr, func] : cfg.functions) {
+        func.name = syms.get_name(addr);
+    }
+
+    if (!rel_mode) {
+        // ---- DOL: forward decl header + registration ----
         char path[512];
         snprintf(path, sizeof(path), "%s/recomp_funcs.h", output_dir.c_str());
         FILE* hdr = fopen(path, "w");
@@ -196,16 +297,13 @@ int main(int argc, char** argv) {
             fprintf(hdr, "// Auto-generated: forward declarations for all recompiled functions\n");
             fprintf(hdr, "#include \"recomp_common.h\"\n\n");
             for (auto& [addr, func] : cfg.functions) {
-                std::string fname = syms.get_name(addr);
-                func.name = fname;
-                fprintf(hdr, "void %s(PPCContext* ctx, Memory* mem);\n", fname.c_str());
+                fprintf(hdr, "void %s(PPCContext* ctx, Memory* mem);\n", func.name.c_str());
             }
             fprintf(hdr, "\n// Register all recompiled functions into the function table\n");
             fprintf(hdr, "void register_recompiled_functions(FuncTable& table);\n");
             fclose(hdr);
         }
 
-        // Generate function registration table
         snprintf(path, sizeof(path), "%s/recomp_register.cpp", output_dir.c_str());
         FILE* reg = fopen(path, "w");
         if (reg) {
@@ -218,45 +316,147 @@ int main(int argc, char** argv) {
             fprintf(reg, "}\n");
             fclose(reg);
         }
-    }
 
-    // Generate recompiled function files
-    for (auto& [addr, func] : cfg.functions) {
-        if (func_count % funcs_per_file == 0) {
-            if (current_file) fclose(current_file);
-            char filename[512];
-            snprintf(filename, sizeof(filename), "%s/recomp_%04d.cpp",
-                     output_dir.c_str(), file_index++);
-            current_file = fopen(filename, "w");
-            if (!current_file) {
-                fprintf(stderr, "Failed to create %s\n", filename);
-                return 1;
+        // Generate recompiled function files (one per N functions).
+        for (auto& [addr, func] : cfg.functions) {
+            if (func_count % funcs_per_file == 0) {
+                if (current_file) fclose(current_file);
+                char filename[512];
+                snprintf(filename, sizeof(filename), "%s/recomp_%04d.cpp",
+                         output_dir.c_str(), file_index++);
+                current_file = fopen(filename, "w");
+                if (!current_file) {
+                    fprintf(stderr, "Failed to create %s\n", filename);
+                    return 1;
+                }
+                emit_file_header(current_file, project_name.c_str());
             }
-            emit_file_header(current_file, project_name.c_str());
+
+            fprintf(current_file, "\n// ---- %s @ 0x%08X ----\n",
+                    func.name.c_str(), addr);
+            fprintf(current_file, "void %s(PPCContext* ctx, Memory* mem) {\n",
+                    func.name.c_str());
+
+            PPCToCEmitter emitter(current_file);
+            emitter.block_addrs = func.block_addrs;
+            for (uint32_t block_addr : func.block_addrs) {
+                auto& block = func.blocks[block_addr];
+                fprintf(current_file, "label_%08X:\n", block_addr);
+                for (const auto& insn : block.instructions) {
+                    emitter.emit_insn(insn);
+                }
+            }
+            fprintf(current_file, "}\n");
+            func_count++;
+        }
+        if (current_file) fclose(current_file);
+
+        printf("\n[*] Done! Generated %d files with %d functions.\n",
+               file_index, func_count);
+    } else {
+        // ---- REL: single .cpp + register fn + entry-point header ----
+        char path[512];
+
+        snprintf(path, sizeof(path), "%s/rel_%s.cpp", output_dir.c_str(),
+                 rel_name.c_str());
+        FILE* cpp = fopen(path, "w");
+        if (!cpp) {
+            fprintf(stderr, "Failed to create %s\n", path);
+            return 1;
+        }
+        emit_file_header(cpp, project_name.c_str());
+        fprintf(cpp, "// REL module: %s\n", rel_path.c_str());
+        fprintf(cpp, "// module_id=%u version=%u base=0x%08X\n",
+                rel.header.module_id, rel.header.version, rel_base);
+        fprintf(cpp, "// prolog: section=%u offset=0x%X  epilog: section=%u "
+                     "offset=0x%X  unresolved: section=%u offset=0x%X\n\n",
+                rel.header.prolog_section, rel.header.prolog_offset,
+                rel.header.epilog_section, rel.header.epilog_offset,
+                rel.header.unresolved_section, rel.header.unresolved_offset);
+
+        for (auto& [addr, func] : cfg.functions) {
+            fprintf(cpp, "\n// ---- %s @ 0x%08X ----\n",
+                    func.name.c_str(), addr);
+            fprintf(cpp, "void %s(PPCContext* ctx, Memory* mem) {\n",
+                    func.name.c_str());
+
+            PPCToCEmitter emitter(cpp);
+            emitter.block_addrs = func.block_addrs;
+            for (uint32_t block_addr : func.block_addrs) {
+                auto& block = func.blocks[block_addr];
+                fprintf(cpp, "label_%08X:\n", block_addr);
+                for (const auto& insn : block.instructions) {
+                    emitter.emit_insn(insn);
+                }
+            }
+            fprintf(cpp, "}\n");
+            func_count++;
+        }
+        fclose(cpp);
+
+        // Header with entry-point macros and the register fn forward decl.
+        snprintf(path, sizeof(path), "%s/rel_%s.h", output_dir.c_str(),
+                 rel_name.c_str());
+        FILE* hdr = fopen(path, "w");
+        if (hdr) {
+            fprintf(hdr, "#pragma once\n");
+            fprintf(hdr, "// Auto-generated header for REL module '%s'\n",
+                    rel_name.c_str());
+            fprintf(hdr, "#include \"recomp_common.h\"\n\n");
+            uint32_t prolog_va = 0, epilog_va = 0, unresolved_va = 0;
+            if (rel.header.prolog_section < rel.section_addresses.size()) {
+                uint32_t base = rel.section_addresses[rel.header.prolog_section];
+                if (base) prolog_va = base + rel.header.prolog_offset;
+            }
+            if (rel.header.epilog_section < rel.section_addresses.size()) {
+                uint32_t base = rel.section_addresses[rel.header.epilog_section];
+                if (base) epilog_va = base + rel.header.epilog_offset;
+            }
+            if (rel.header.unresolved_section < rel.section_addresses.size()) {
+                uint32_t base = rel.section_addresses[rel.header.unresolved_section];
+                if (base) unresolved_va = base + rel.header.unresolved_offset;
+            }
+            fprintf(hdr, "#define REL_%s_MODULE_ID      0x%08Xu\n",
+                    rel_name.c_str(), rel.header.module_id);
+            fprintf(hdr, "#define REL_%s_BASE           0x%08Xu\n",
+                    rel_name.c_str(), rel_base);
+            fprintf(hdr, "#define REL_%s_PROLOG_VA      0x%08Xu\n",
+                    rel_name.c_str(), prolog_va);
+            fprintf(hdr, "#define REL_%s_EPILOG_VA      0x%08Xu\n",
+                    rel_name.c_str(), epilog_va);
+            fprintf(hdr, "#define REL_%s_UNRESOLVED_VA  0x%08Xu\n\n",
+                    rel_name.c_str(), unresolved_va);
+            for (auto& [addr, func] : cfg.functions) {
+                fprintf(hdr, "void %s(PPCContext* ctx, Memory* mem);\n",
+                        func.name.c_str());
+            }
+            fprintf(hdr, "\nvoid rel_%s_register(FuncTable& table);\n",
+                    rel_name.c_str());
+            fclose(hdr);
         }
 
-        fprintf(current_file, "\n// ---- %s @ 0x%08X ----\n", func.name.c_str(), addr);
-        fprintf(current_file, "void %s(PPCContext* ctx, Memory* mem) {\n", func.name.c_str());
-
-        PPCToCEmitter emitter(current_file);
-        emitter.block_addrs = func.block_addrs;
-
-        for (uint32_t block_addr : func.block_addrs) {
-            auto& block = func.blocks[block_addr];
-            fprintf(current_file, "label_%08X:\n", block_addr);
-
-            for (const auto& insn : block.instructions) {
-                emitter.emit_insn(insn);
+        // Registration cpp.
+        snprintf(path, sizeof(path), "%s/rel_%s_register.cpp",
+                 output_dir.c_str(), rel_name.c_str());
+        FILE* reg = fopen(path, "w");
+        if (reg) {
+            fprintf(reg, "// Auto-generated registration for REL '%s'\n",
+                    rel_name.c_str());
+            fprintf(reg, "#include \"rel_%s.h\"\n\n", rel_name.c_str());
+            fprintf(reg, "void rel_%s_register(FuncTable& table) {\n",
+                    rel_name.c_str());
+            for (auto& [addr, func] : cfg.functions) {
+                fprintf(reg, "    table.register_func(0x%08X, %s);\n",
+                        addr, func.name.c_str());
             }
+            fprintf(reg, "}\n");
+            fclose(reg);
         }
 
-        fprintf(current_file, "}\n");
-        func_count++;
+        printf("\n[*] Done! Generated rel_%s.cpp / .h / _register.cpp "
+               "with %d functions.\n",
+               rel_name.c_str(), func_count);
     }
-
-    if (current_file) fclose(current_file);
-
-    printf("\n[*] Done! Generated %d files with %d functions.\n", file_index, func_count);
 
     return 0;
 }

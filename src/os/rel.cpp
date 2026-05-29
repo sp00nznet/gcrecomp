@@ -14,6 +14,7 @@
 // =============================================================================
 
 #include "gcrecomp/rel.h"
+#include "gcrecomp/dol.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -170,16 +171,13 @@ bool RELFile::load_from_buffer(const uint8_t* data, size_t size,
     }
 
     // ---- Relocations ----
-    // The reloc stream is one big concatenation; imports[i].offset points
-    // into it. Walk it once and store everything; consumers can group by
-    // import if they need to.
-    relocations.clear();
-    // Conservative pre-reserve: imp_size / 8 entries on average have a
-    // handful of relocs each. Don't over-think.
+    // One stream per import. Each stream is terminated by R_DOLPHIN_END.
+    reloc_streams.clear();
+    reloc_streams.reserve(imports.size());
     if (header.rel_offset != 0) {
-        // We don't know the total reloc table size ahead of time — walk
-        // each import's section, terminated by R_DOLPHIN_END (203).
         for (const auto& imp : imports) {
+            RELRelocStream stream;
+            stream.module_id = imp.module_id;
             uint32_t cur = imp.offset;
             while (cur + 8 <= buf.size()) {
                 const uint8_t* e = buf.data() + cur;
@@ -188,10 +186,11 @@ bool RELFile::load_from_buffer(const uint8_t* data, size_t size,
                 r.type    = (RELRelocType)e[2];
                 r.section = e[3];
                 r.addend  = read_be32(e + 4);
-                relocations.push_back(r);
+                stream.entries.push_back(r);
                 cur += 8;
                 if (r.type == RELRelocType::R_DOLPHIN_END) break;
             }
+            reloc_streams.push_back(std::move(stream));
         }
     }
     return true;
@@ -219,8 +218,243 @@ void RELFile::print_info() const {
                s.executable ? "exec " : "",
                (s.offset == 0 && s.size > 0) ? "(BSS)" : "");
     }
-    printf("[REL]   imports=%zu  relocations=%zu\n",
-           imports.size(), relocations.size());
+    size_t total_relocs = 0;
+    for (const auto& s : reloc_streams) total_relocs += s.entries.size();
+    printf("[REL]   imports=%zu  reloc_streams=%zu  total_relocs=%zu\n",
+           imports.size(), reloc_streams.size(), total_relocs);
+}
+
+// ---- REL → DOL adapter ------------------------------------------------------
+
+static inline uint32_t align_up(uint32_t v, uint32_t a) {
+    if (a < 2) return v;
+    return (v + (a - 1)) & ~(a - 1);
+}
+
+bool rel_to_dol(RELFile& rel, uint32_t base_addr,
+                const DOLFile* host_dol,
+                DOLFile& out)
+{
+    // ---- Pass 1: assign virtual addresses to each section ----
+    const uint32_t section_align = rel.header.align ? rel.header.align : 4;
+    const uint32_t bss_align     = rel.header.bss_align ? rel.header.bss_align : 4;
+
+    rel.section_addresses.assign(rel.sections.size(), 0);
+    uint32_t cursor = align_up(base_addr, section_align);
+
+    // Place non-BSS sections first.
+    for (size_t i = 0; i < rel.sections.size(); ++i) {
+        auto& s = rel.sections[i];
+        if (s.size == 0) continue;
+        if (s.offset == 0) continue;  // BSS — defer
+        cursor = align_up(cursor, section_align);
+        rel.section_addresses[i] = cursor;
+        cursor += s.size;
+    }
+    // Then BSS.
+    for (size_t i = 0; i < rel.sections.size(); ++i) {
+        auto& s = rel.sections[i];
+        if (s.size == 0) continue;
+        if (s.offset != 0) continue;  // already placed
+        cursor = align_up(cursor, bss_align);
+        rel.section_addresses[i] = cursor;
+        cursor += s.size;
+    }
+
+    // ---- Pass 2: apply relocations ----
+    // Each stream is stateful: cur_section starts at 0, cur_offset starts
+    // at 0, advanced by entry.offset for every reloc. R_DOLPHIN_SECTION
+    // resets cur_offset to 0 and changes cur_section to entry.section.
+    auto patch_be32 = [&](size_t sec_idx, uint32_t off, uint32_t val) {
+        if (sec_idx >= rel.sections.size()) return;
+        auto& s = rel.sections[sec_idx];
+        if (off + 4 > s.data.size()) return;
+        s.data[off + 0] = (uint8_t)(val >> 24);
+        s.data[off + 1] = (uint8_t)(val >> 16);
+        s.data[off + 2] = (uint8_t)(val >> 8);
+        s.data[off + 3] = (uint8_t)val;
+    };
+    auto read_be32_at = [&](size_t sec_idx, uint32_t off) -> uint32_t {
+        if (sec_idx >= rel.sections.size()) return 0;
+        auto& s = rel.sections[sec_idx];
+        if (off + 4 > s.data.size()) return 0;
+        return (uint32_t(s.data[off + 0]) << 24) |
+               (uint32_t(s.data[off + 1]) << 16) |
+               (uint32_t(s.data[off + 2]) << 8)  |
+                uint32_t(s.data[off + 3]);
+    };
+    auto patch_be16 = [&](size_t sec_idx, uint32_t off, uint16_t val) {
+        if (sec_idx >= rel.sections.size()) return;
+        auto& s = rel.sections[sec_idx];
+        if (off + 2 > s.data.size()) return;
+        s.data[off + 0] = (uint8_t)(val >> 8);
+        s.data[off + 1] = (uint8_t)val;
+    };
+
+    int internal_applied = 0;
+    int external_applied = 0;
+    int external_skipped = 0;
+
+    for (const auto& stream : rel.reloc_streams) {
+        bool is_internal = (stream.module_id == rel.header.module_id);
+        bool is_main_dol = (stream.module_id == 0);
+
+        uint32_t cur_section_idx = 0;
+        uint32_t cur_offset      = 0;
+
+        for (const auto& r : stream.entries) {
+            cur_offset += r.offset;
+
+            if (r.type == RELRelocType::R_DOLPHIN_NOP) continue;
+            if (r.type == RELRelocType::R_DOLPHIN_SECTION) {
+                cur_section_idx = r.section;
+                cur_offset      = 0;
+                continue;
+            }
+            if (r.type == RELRelocType::R_DOLPHIN_END) break;
+
+            // Compute target address (S + A).
+            uint32_t S = 0;
+            bool resolved = false;
+            if (is_internal) {
+                if (r.section < rel.section_addresses.size()) {
+                    S = rel.section_addresses[r.section];
+                    resolved = (S != 0 || rel.sections[r.section].size != 0);
+                }
+            } else if (is_main_dol && host_dol) {
+                // Main DOL references: addend is the absolute address.
+                // (The "section" field is a section index in the DOL.)
+                // The simplest correct interpretation is "addend already
+                // is the full address" since the main DOL has fixed
+                // load addresses.
+                S = 0;
+                resolved = true;
+            } else {
+                external_skipped++;
+                continue;
+            }
+            uint32_t T = S + r.addend;
+
+            // Apply patch by reloc type.
+            switch (r.type) {
+                case RELRelocType::R_PPC_ADDR32: {
+                    patch_be32(cur_section_idx, cur_offset, T);
+                    break;
+                }
+                case RELRelocType::R_PPC_ADDR24: {
+                    // Branch target replacing low 26 bits, masked to 24
+                    // (LK and AA bits preserved).
+                    uint32_t insn = read_be32_at(cur_section_idx, cur_offset);
+                    uint32_t hi   = insn & 0xFC000003u;
+                    uint32_t off  = T & 0x03FFFFFCu;
+                    patch_be32(cur_section_idx, cur_offset, hi | off);
+                    break;
+                }
+                case RELRelocType::R_PPC_ADDR16:
+                case RELRelocType::R_PPC_ADDR16_LO: {
+                    patch_be16(cur_section_idx, cur_offset, (uint16_t)T);
+                    break;
+                }
+                case RELRelocType::R_PPC_ADDR16_HI: {
+                    patch_be16(cur_section_idx, cur_offset, (uint16_t)(T >> 16));
+                    break;
+                }
+                case RELRelocType::R_PPC_ADDR16_HA: {
+                    uint32_t hi = T >> 16;
+                    if (T & 0x8000) hi += 1;
+                    patch_be16(cur_section_idx, cur_offset, (uint16_t)hi);
+                    break;
+                }
+                case RELRelocType::R_PPC_ADDR14: {
+                    uint32_t insn = read_be32_at(cur_section_idx, cur_offset);
+                    uint32_t hi   = insn & 0xFFFF0003u;
+                    uint32_t off  = T & 0x0000FFFCu;
+                    patch_be32(cur_section_idx, cur_offset, hi | off);
+                    break;
+                }
+                case RELRelocType::R_PPC_REL24: {
+                    uint32_t patch_va = rel.section_addresses[cur_section_idx]
+                                      + cur_offset;
+                    int32_t  delta    = (int32_t)(T - patch_va);
+                    uint32_t insn     = read_be32_at(cur_section_idx, cur_offset);
+                    uint32_t hi       = insn & 0xFC000003u;
+                    uint32_t off      = ((uint32_t)delta) & 0x03FFFFFCu;
+                    patch_be32(cur_section_idx, cur_offset, hi | off);
+                    break;
+                }
+                case RELRelocType::R_PPC_REL14: {
+                    uint32_t patch_va = rel.section_addresses[cur_section_idx]
+                                      + cur_offset;
+                    int32_t  delta    = (int32_t)(T - patch_va);
+                    uint32_t insn     = read_be32_at(cur_section_idx, cur_offset);
+                    uint32_t hi       = insn & 0xFFFF0003u;
+                    uint32_t off      = ((uint32_t)delta) & 0x0000FFFCu;
+                    patch_be32(cur_section_idx, cur_offset, hi | off);
+                    break;
+                }
+                default:
+                    // Unknown — log and skip.
+                    fprintf(stderr, "[REL] unknown reloc type %u at "
+                            "sec %u offset 0x%X\n",
+                            (unsigned)r.type, cur_section_idx, cur_offset);
+                    break;
+            }
+
+            if (resolved) {
+                if (is_internal) internal_applied++;
+                else             external_applied++;
+            }
+        }
+    }
+
+    fprintf(stderr, "[REL] reloc summary: %d internal, %d external resolved, "
+                    "%d external skipped\n",
+            internal_applied, external_applied, external_skipped);
+
+    // ---- Pass 3: build DOLFile view ----
+    out = DOLFile{};
+    out.bss_address = 0;
+    out.bss_size    = 0;
+    out.entry_point = 0;
+    if (rel.header.prolog_section < rel.sections.size()) {
+        uint32_t base = rel.section_addresses[rel.header.prolog_section];
+        if (base != 0) {
+            out.entry_point = base + rel.header.prolog_offset;
+        }
+    }
+
+    uint32_t mem_lo = 0xFFFFFFFFu;
+    uint32_t mem_hi = 0u;
+
+    for (size_t i = 0; i < rel.sections.size(); ++i) {
+        const auto& rs = rel.sections[i];
+        if (rs.size == 0) continue;
+        DOLSection ds;
+        ds.file_offset = rs.offset;
+        ds.address     = rel.section_addresses[i];
+        ds.size        = rs.size;
+        ds.is_text     = rs.executable;
+        ds.index       = (int)i;
+        ds.data        = rs.data;  // already patched in-place above
+        if (ds.address < mem_lo) mem_lo = ds.address;
+        if (ds.address + ds.size > mem_hi) mem_hi = ds.address + ds.size;
+        out.sections.push_back(std::move(ds));
+    }
+
+    if (out.sections.empty()) {
+        fprintf(stderr, "[REL] no sections to emit\n");
+        return false;
+    }
+
+    out.memory_base = mem_lo;
+    out.memory_end  = mem_hi;
+    out.memory.assign(mem_hi - mem_lo, 0);
+    for (const auto& ds : out.sections) {
+        uint32_t off = ds.address - mem_lo;
+        if (off + ds.size > out.memory.size()) continue;
+        memcpy(out.memory.data() + off, ds.data.data(), ds.size);
+    }
+    return true;
 }
 
 } // namespace gcrecomp

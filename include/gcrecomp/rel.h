@@ -91,11 +91,20 @@ struct RELImport {
     uint32_t offset;         // File offset to relocations for this import
 };
 
+// One relocation stream per import. Reloc semantics are stateful: a
+// (cur_section, cur_offset) cursor is reset on R_DOLPHIN_SECTION and
+// advanced by `offset` for every other entry, then the typed
+// patch is applied at (cur_section, cur_offset).
+struct RELRelocStream {
+    uint32_t                   module_id;  // Same as import.module_id
+    std::vector<RELRelocation> entries;
+};
+
 struct RELFile {
     RELHeader header;
     std::vector<RELSection>    sections;
     std::vector<RELImport>     imports;
-    std::vector<RELRelocation> relocations;
+    std::vector<RELRelocStream> reloc_streams;
     std::string                name;
 
     bool load(const std::string& path);
@@ -107,6 +116,27 @@ struct RELFile {
                           const std::string& name_hint = "");
 
     void print_info() const;
+
+    // Computed at lay-out time: per-section virtual address (or 0 if the
+    // section has zero size and isn't placed).
+    std::vector<uint32_t> section_addresses;
 };
+
+// Forward decl — defined in dol.h.
+struct DOLFile;
+
+// Lay out a REL's sections at a chosen virtual base, apply internal
+// relocations (against sections owned by this REL), and produce a
+// DOLFile-shaped object the CFG/codegen pipeline can consume. The
+// host_dol is optional; if provided, R_PPC_ADDR/REL relocs against
+// module_id==0 (the main DOL) are also resolved against its address
+// space. External-module references (other RELs) are left at zero.
+//
+// On return, rel.section_addresses[i] holds the chosen load address for
+// section i (or 0 if not placed). out.sections[].address reflects the
+// same.
+bool rel_to_dol(RELFile& rel, uint32_t base_addr,
+                const DOLFile* host_dol,
+                DOLFile& out);
 
 } // namespace gcrecomp
