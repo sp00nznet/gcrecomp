@@ -365,6 +365,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         emit_file_header(cpp, project_name.c_str());
+        // Include the per-REL header for internal function forward decls.
+        // The header also brings in recomp_common.h transitively.
+        fprintf(cpp, "#include \"rel_%s.h\"\n\n", rel_name.c_str());
         fprintf(cpp, "// REL module: %s\n", rel_path.c_str());
         fprintf(cpp, "// module_id=%u version=%u base=0x%08X\n",
                 rel.header.module_id, rel.header.version, rel_base);
@@ -373,6 +376,30 @@ int main(int argc, char** argv) {
                 rel.header.prolog_section, rel.header.prolog_offset,
                 rel.header.epilog_section, rel.header.epilog_offset,
                 rel.header.unresolved_section, rel.header.unresolved_offset);
+
+        // Collect all call targets across REL functions. Any address NOT
+        // already in cfg.functions is an external reference (most likely
+        // a function in the host DOL or another REL). Emit forward
+        // declarations for them so the REL cpp links standalone.
+        std::set<uint32_t> external_calls;
+        for (auto& [addr, func] : cfg.functions) {
+            for (uint32_t call_addr : func.calls) {
+                if (cfg.functions.find(call_addr) == cfg.functions.end()) {
+                    external_calls.insert(call_addr);
+                }
+            }
+        }
+        if (!external_calls.empty()) {
+            fprintf(cpp, "// Forward declarations for external functions "
+                         "(host DOL / other RELs).\n");
+            fprintf(cpp, "// These are resolved at link time by the host "
+                         "DOL's recomp_funcs.h or the appropriate REL.\n");
+            for (uint32_t a : external_calls) {
+                fprintf(cpp, "extern void func_%08X(PPCContext* ctx, "
+                             "Memory* mem);\n", a);
+            }
+            fprintf(cpp, "\n");
+        }
 
         for (auto& [addr, func] : cfg.functions) {
             fprintf(cpp, "\n// ---- %s @ 0x%08X ----\n",
@@ -433,6 +460,49 @@ int main(int argc, char** argv) {
             fprintf(hdr, "\nvoid rel_%s_register(FuncTable& table);\n",
                     rel_name.c_str());
             fclose(hdr);
+        }
+
+        // Stubs file: any external function the REL calls that's not in
+        // the host DOL's recomp_funcs.h will be unresolved at link time.
+        // Generate weak no-op stubs for all of them. The host can override
+        // any by providing a real definition elsewhere; the linker will
+        // pick that over the weak stub.
+        // (Note: MSVC's /alternatename has different semantics from GNU
+        // weak symbols — we use plain functions and rely on the host to
+        // exclude this file when overriding. Simpler approach: only emit
+        // stubs for symbols NOT in cfg's known set.)
+        snprintf(path, sizeof(path), "%s/rel_%s_external_stubs.cpp",
+                 output_dir.c_str(), rel_name.c_str());
+        FILE* stubs = fopen(path, "w");
+        if (stubs) {
+            fprintf(stubs, "// Auto-generated external function stubs for "
+                           "REL '%s'.\n", rel_name.c_str());
+            fprintf(stubs, "// Each call target referenced by the REL but "
+                           "not provided by the\n");
+            fprintf(stubs, "// host DOL recompilation gets a no-op stub so "
+                           "the linker resolves.\n");
+            fprintf(stubs, "// To override a specific stub with real "
+                           "behavior, exclude this file\n");
+            fprintf(stubs, "// from the build and provide your own "
+                           "implementations.\n\n");
+            fprintf(stubs, "#include \"recomp_common.h\"\n");
+            fprintf(stubs, "#include \"recomp_funcs.h\"\n\n");
+            // For each external call, emit a weak stub guarded by a
+            // preprocessor check against the DOL's forward decls. We can't
+            // easily test that in C++; instead, the recompiler driver
+            // could compare against a known symbol list. For simplicity,
+            // only emit stubs for symbols outside the DOL's normal range
+            // (0x80xxxxxx) — those are clearly missing and won't conflict.
+            int stub_count = 0;
+            for (uint32_t a : external_calls) {
+                // Skip DOL range — those are handled by recomp_funcs.h.
+                if (a >= 0x80000000u && a < 0x81000000u) continue;
+                fprintf(stubs, "void func_%08X(PPCContext* ctx, Memory* mem) "
+                               "{ (void)ctx; (void)mem; }\n", a);
+                stub_count++;
+            }
+            fclose(stubs);
+            printf("[*] Emitted %d external stubs.\n", stub_count);
         }
 
         // Registration cpp.
