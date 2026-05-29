@@ -37,6 +37,8 @@ static void print_usage(const char* prog) {
     printf("Options:\n");
     printf("  --map <file>         Load Dolphin symbol map\n");
     printf("  --csv <file>         Load CSV symbol map (addr,name)\n");
+    printf("  --ghidra <dir>       Load Ghidra headless JSON exports from <dir>\n");
+    printf("                       (expects functions.json + symbols.json)\n");
     printf("  --output <dir>       Output directory (default: ./recompiled)\n");
     printf("  --extra-funcs <file> Force-add function entries (one hex addr/line)\n");
     printf("  --funcs-per-file <n> Functions per output file (default: 200)\n");
@@ -105,6 +107,7 @@ int main(int argc, char** argv) {
     std::string dol_path;
     std::string map_path;
     std::string csv_path;
+    std::string ghidra_dir;
     std::string extra_funcs_path;
     std::string output_dir = "recompiled";
     std::string project_name = "gcrecomp";
@@ -120,6 +123,8 @@ int main(int argc, char** argv) {
             map_path = argv[++i];
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
+        } else if (strcmp(argv[i], "--ghidra") == 0 && i + 1 < argc) {
+            ghidra_dir = argv[++i];
         } else if (strcmp(argv[i], "--extra-funcs") == 0 && i + 1 < argc) {
             extra_funcs_path = argv[++i];
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
@@ -202,6 +207,11 @@ int main(int argc, char** argv) {
     SymbolMap syms;
     if (!map_path.empty()) syms.load_dolphin_map(map_path);
     if (!csv_path.empty()) syms.load_csv(csv_path);
+    if (!ghidra_dir.empty()) {
+        std::string fns_path = ghidra_dir + "/functions.json";
+        std::string sym_path = ghidra_dir + "/symbols.json";
+        syms.load_ghidra_json(fns_path, sym_path);
+    }
 
     // ---- Build CFG ----
     printf("\n[*] Building control flow graph...\n");
@@ -339,6 +349,7 @@ int main(int argc, char** argv) {
 
             PPCToCEmitter emitter(current_file);
             emitter.block_addrs = func.block_addrs;
+            emitter.syms = &syms;
             for (uint32_t block_addr : func.block_addrs) {
                 auto& block = func.blocks[block_addr];
                 fprintf(current_file, "label_%08X:\n", block_addr);
@@ -395,8 +406,8 @@ int main(int argc, char** argv) {
             fprintf(cpp, "// These are resolved at link time by the host "
                          "DOL's recomp_funcs.h or the appropriate REL.\n");
             for (uint32_t a : external_calls) {
-                fprintf(cpp, "extern void func_%08X(PPCContext* ctx, "
-                             "Memory* mem);\n", a);
+                fprintf(cpp, "extern void %s(PPCContext* ctx, "
+                             "Memory* mem);\n", syms.get_name(a).c_str());
             }
             fprintf(cpp, "\n");
         }
@@ -409,6 +420,7 @@ int main(int argc, char** argv) {
 
             PPCToCEmitter emitter(cpp);
             emitter.block_addrs = func.block_addrs;
+            emitter.syms = &syms;
             for (uint32_t block_addr : func.block_addrs) {
                 auto& block = func.blocks[block_addr];
                 fprintf(cpp, "label_%08X:\n", block_addr);
@@ -497,8 +509,9 @@ int main(int argc, char** argv) {
             for (uint32_t a : external_calls) {
                 // Skip DOL range — those are handled by recomp_funcs.h.
                 if (a >= 0x80000000u && a < 0x81000000u) continue;
-                fprintf(stubs, "void func_%08X(PPCContext* ctx, Memory* mem) "
-                               "{ (void)ctx; (void)mem; }\n", a);
+                fprintf(stubs, "void %s(PPCContext* ctx, Memory* mem) "
+                               "{ (void)ctx; (void)mem; }\n",
+                        syms.get_name(a).c_str());
                 stub_count++;
             }
             fclose(stubs);

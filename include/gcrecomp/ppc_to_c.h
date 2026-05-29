@@ -13,11 +13,16 @@
 
 namespace gcrecomp {
 
+struct SymbolMap;  // fwd; defined in symbol_map.h
+
 class PPCToCEmitter {
 public:
     FILE* out;
     int   indent_level;
     std::vector<uint32_t> block_addrs;
+    // Optional: when set, direct branches resolve target addresses to
+    // symbolic names. Unset addresses fall back to func_XXXXXXXX.
+    const SymbolMap* syms = nullptr;
 
     PPCToCEmitter(FILE* f) : out(f), indent_level(1) {}
 

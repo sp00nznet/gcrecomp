@@ -11,6 +11,7 @@
 // =============================================================================
 
 #include "gcrecomp/ppc_to_c.h"
+#include "gcrecomp/symbol_map.h"
 #include <cstdio>
 #include <cstdarg>
 #include <string>
@@ -901,7 +902,15 @@ namespace gcrecomp {
         // ==== Branch ====
         case PPCInsnType::B:
             if (insn.link) {
-                emit("ctx->lr = 0x%08Xu; func_%08X(ctx, mem); // bl", insn.address + 4, insn.branch_target);
+                std::string callee = syms
+                    ? syms->get_name(insn.branch_target)
+                    : (std::string("func_") + [&]{
+                          char b[16];
+                          snprintf(b, sizeof(b), "%08X", insn.branch_target);
+                          return std::string(b);
+                      }());
+                emit("ctx->lr = 0x%08Xu; %s(ctx, mem); // bl 0x%08X",
+                     insn.address + 4, callee.c_str(), insn.branch_target);
             } else {
                 emit("goto label_%08X; // b", insn.branch_target);
             }
