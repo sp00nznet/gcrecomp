@@ -109,6 +109,25 @@ uint32_t Memory::read32(uint32_t addr) const {
             fflush(stdout);
         }
 
+        // PI Interrupt Cause @ 0xCC003000: the OS spins reading this waiting
+        // for interrupts to fire (VI vblank, DI complete, etc.) and to then
+        // be cleared. We don't generate real interrupts and never call the
+        // OS handler, so left alone the register stays zero forever.
+        //
+        // HLE pattern: emit a VI+DI pending pulse periodically — return a
+        // non-zero value once every N reads, then 0 for the rest. The
+        // pulse lets handlers that branch "if any pending" make progress;
+        // the zeros let "wait until cleared" loops exit too.
+        if (addr == 0xCC003000) {
+            uint8_t* p = const_cast<uint8_t*>(hw_regs + (addr - HW_REG_BASE));
+            static uint32_t pi_pulse_tick = 0;
+            uint32_t synth = (++pi_pulse_tick % 64 == 1) ? 0x00000104 : 0;
+            p[0] = (uint8_t)(synth >> 24);
+            p[1] = (uint8_t)(synth >> 16);
+            p[2] = (uint8_t)(synth >> 8);
+            p[3] = (uint8_t)synth;
+        }
+
         // VI: Simulate advancing half-line counter so VIWaitForRetrace works.
         // Real VI generates interrupts at vertical blank (line 263/525 for NTSC).
         // 0xCC002000+0x24 = 0xCC002024 = VI_VCOUNT (vertical beam position)
