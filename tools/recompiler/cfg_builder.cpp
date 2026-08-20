@@ -11,6 +11,66 @@
 
 namespace gcrecomp {
 
+namespace {
+
+// Does `addr` begin a function, or land mid-way through one?
+//
+// The tail-call heuristic below promotes distant `b` targets to function
+// entries. In a codebase with multi-kilobyte functions a long intra-function
+// branch to a shared epilogue is completely ordinary, and promoting one
+// produces a "function" that pops a stack frame it never pushed: called
+// through the dispatch table it leaks r1 and restores callee-saved registers
+// from whatever occupies those slots, silently corrupting its caller.
+//
+// So walk forward and look at what the code does to r1 first. A real entry
+// either establishes a frame (stwu r1, -N(r1)) or, if it is a leaf, never
+// touches r1 at all. Reaching a pop (addi r1, r1, +N) or an mtlr with no
+// preceding push means we are standing in somebody else's epilogue.
+bool looks_like_function_entry(uint32_t addr, const DOLFile& dol) {
+    constexpr int kMaxScan = 96;   // longest plausible prologue-to-epilogue run
+    constexpr uint32_t kSprLR = 8;
+
+    uint32_t at = addr;
+    for (int i = 0; i < kMaxScan; i++) {
+        if (!dol.is_code(at)) return false;
+        PPCInsn insn = ppc_disasm(dol.read32(at), at);
+
+        // Frame established: this is an entry.
+        if (insn.type == PPCInsnType::STWU && insn.ra == 1 && insn.rs == 1 &&
+            insn.simm < 0) {
+            return true;
+        }
+        // Frame torn down before any was set up: mid-function.
+        if (insn.type == PPCInsnType::ADDI && insn.rd == 1 && insn.ra == 1 &&
+            insn.simm > 0) {
+            return false;
+        }
+        // Restoring the return address without having saved it: mid-function.
+        if (insn.type == PPCInsnType::MTSPR && insn.spr == kSprLR) {
+            return false;
+        }
+        // A leaf that returns without ever touching r1 is a legitimate entry.
+        if (insn.is_return()) return true;
+
+        // An unconditional branch continues the straight-line run somewhere
+        // else, so follow it. This is the case that matters: a jump-table
+        // case body is a couple of instructions and a hop to the shared
+        // epilogue, and only by following do we reach the pop that gives it
+        // away. A bl returns here, so it just advances. The iteration budget
+        // bounds any loop we walk into.
+        if (insn.type == PPCInsnType::B && !insn.link) {
+            at = (uint32_t)insn.branch_target;
+            continue;
+        }
+        at += 4;
+    }
+    return true;
+}
+
+
+}  // namespace
+
+
 void CFG::build(const DOLFile& dol) {
     scan_targets(dol);
     build_functions(dol);
@@ -38,7 +98,11 @@ void CFG::scan_targets(const DOLFile& dol) {
             else if (insn.type == PPCInsnType::B && !insn.link) {
                 uint32_t target = insn.branch_target;
                 int32_t offset = (int32_t)target - (int32_t)insn.address;
-                if (dol.is_code(target) && (offset > 0x100 || offset < -0x100)) {
+                // Distance alone does not distinguish a tail call from a long
+                // branch inside one big function, so also require the target to
+                // actually look like an entry. See looks_like_function_entry().
+                if (dol.is_code(target) && (offset > 0x100 || offset < -0x100) &&
+                    looks_like_function_entry(target, dol)) {
                     tail_call_candidates.insert(target);
                 }
             }
@@ -67,7 +131,11 @@ void CFG::scan_targets(const DOLFile& dol) {
             uint32_t val = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
                            ((uint32_t)p[2] << 8) | p[3];
 
-            if (dol.is_code(val) && (val & 3) == 0) {
+            // A word in .data that happens to look like a code address is
+            // not necessarily a function: jump tables live here too, and
+            // their entries point mid-function.
+            if (dol.is_code(val) && (val & 3) == 0 &&
+                looks_like_function_entry(val, dol)) {
                 call_targets.insert(val);
             }
         }
@@ -147,7 +215,8 @@ void CFG::scan_targets(const DOLFile& dol) {
                 matched = true;
             }
 
-            if (matched && (addr & 3u) == 0 && dol.is_code(addr)) {
+            if (matched && (addr & 3u) == 0 && dol.is_code(addr) &&
+                looks_like_function_entry(addr, dol)) {
                 call_targets.insert(addr);
             }
         }
