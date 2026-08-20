@@ -36,3 +36,6 @@ desktop.ini
 *.dol
 *.rel
 *.bnr
+
+# Local agent state
+.claude/

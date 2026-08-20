@@ -20,13 +20,80 @@
 // =============================================================================
 
 #include "gcrecomp/runtime.h"
+#include <algorithm>
 #include <cstdio>
+#include <unordered_map>
+#include <vector>
 
 #include <atomic>
 
 namespace gcrecomp {
 
 FuncTable g_func_table;
+
+// =============================================================================
+// Tracing — see runtime.h. The ring is always allocated; the inline
+// trace_enter only writes when g_trace_enabled is set, so the cost when
+// disabled is one relaxed atomic load per recompiled function entry.
+// =============================================================================
+TraceRing            g_trace_ring;
+std::atomic<bool>    g_trace_enabled{false};
+
+void trace_enter(uint32_t addr) {
+    if (g_trace_enabled.load(std::memory_order_relaxed)) {
+        uint64_t p = g_trace_ring.pos.fetch_add(1, std::memory_order_relaxed);
+        g_trace_ring.entries[p & (TraceRing::SIZE - 1)] = addr;
+    }
+}
+
+void trace_set_enabled(bool on) {
+    g_trace_enabled.store(on, std::memory_order_release);
+    printf("[Trace] %s — recompiled function entries %s recorded\n",
+           on ? "ENABLED" : "DISABLED",
+           on ? "now being" : "no longer");
+    fflush(stdout);
+}
+
+void trace_dump_recent(size_t n) {
+    uint64_t pos = g_trace_ring.pos.load(std::memory_order_acquire);
+    if (pos == 0) {
+        printf("[Trace] ring empty\n");
+        fflush(stdout);
+        return;
+    }
+    size_t count = std::min<size_t>(n, std::min<uint64_t>(pos, TraceRing::SIZE));
+    printf("[Trace] last %zu function entries (oldest -> newest, total seen %llu):\n",
+           count, (unsigned long long)pos);
+    for (size_t i = count; i > 0; --i) {
+        uint64_t idx = (pos - i) & (TraceRing::SIZE - 1);
+        printf("  %5zu: func_%08X\n", count - i, g_trace_ring.entries[idx]);
+    }
+    fflush(stdout);
+}
+
+void trace_dump_summary() {
+    uint64_t pos = g_trace_ring.pos.load(std::memory_order_acquire);
+    if (pos == 0) {
+        printf("[Trace] ring empty\n");
+        fflush(stdout);
+        return;
+    }
+    size_t count = std::min<uint64_t>(pos, TraceRing::SIZE);
+    std::unordered_map<uint32_t, uint32_t> hist;
+    for (size_t i = 0; i < count; ++i) hist[g_trace_ring.entries[i]]++;
+
+    std::vector<std::pair<uint32_t, uint32_t>> ordered(hist.begin(), hist.end());
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    printf("[Trace] histogram of %zu most-recent entries (%zu unique funcs, total %llu seen):\n",
+           count, ordered.size(), (unsigned long long)pos);
+    size_t top = std::min<size_t>(ordered.size(), 20);
+    for (size_t i = 0; i < top; ++i) {
+        printf("  %6u  func_%08X\n", ordered[i].second, ordered[i].first);
+    }
+    fflush(stdout);
+}
 
 void FuncTable::register_func(uint32_t gc_addr, RecompiledFunc func) {
     table[gc_addr] = func;

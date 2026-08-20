@@ -22,6 +22,7 @@
 // =============================================================================
 
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/interrupts.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +53,23 @@ void Memory::shutdown() {
 }
 
 uint8_t* Memory::translate(uint32_t addr) {
+    // Heartbeat: prove the recompiled CPU is making forward progress.
+    // Fires every 16M memory ops (~once per second for typical code).
+    static uint64_t op_count = 0;
+    if ((++op_count & 0xFFFFFF) == 0) {
+        printf("[HB] %llu mem ops, last addr 0x%08X\n",
+               (unsigned long long)op_count, addr);
+        fflush(stdout);
+    }
+
+    // Interrupt delivery: poll the periodic scheduler every 256K ops.
+    // The scheduler returns early unless its deadline has elapsed, so this
+    // is cheap on the steady-state path. We pass &g_ctx because we don't
+    // have access to the current ctx here — the recompiled code uses
+    // g_ctx directly (see recomp_common.h's using-declarations).
+    if ((op_count & 0x3FFFF) == 0) {
+        g_interrupts.tick(&g_ctx, this);
+    }
     // Cached region: 0x80000000 - 0x80000000+ram_size
     if (addr >= MAIN_RAM_BASE && addr < ram_end) {
         return ram + (addr - MAIN_RAM_BASE);
@@ -87,6 +105,51 @@ uint8_t Memory::read8(uint32_t addr) const {
 }
 
 uint16_t Memory::read16(uint32_t addr) const {
+    // Spin-detection: when a HW reg is read >100K times in a row from
+    // the same address, the game is polling for something. Print the
+    // value so we can identify which bits it expects to change.
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        static uint32_t last_addr = 0;
+        static uint64_t same_count = 0;
+        if (addr == last_addr) {
+            same_count++;
+            if (same_count == 100000 || (same_count > 100000 && (same_count & 0xFFFFFF) == 0)) {
+                const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+                uint16_t v = ((uint16_t)p[0] << 8) | p[1];
+                printf("[Poll] Read16 0x%08X (count %llu) = 0x%04X  LR=0x%08X\n",
+                       addr, (unsigned long long)same_count, v, g_ctx.lr);
+                fflush(stdout);
+            }
+        } else {
+            last_addr = addr;
+            same_count = 1;
+        }
+    }
+
+    // DSP -> CPU mailbox HIGH (0xCC005004): bit 15 (0x8000) is the
+    // "DSP has a message for the CPU" flag. With no DSP emulation we
+    // simulate the protocol: the *first* read returns the stored value
+    // (so the OS init "wait until mailbox is empty" poll exits when bit 15
+    // is naturally 0), and every subsequent read returns the stored value
+    // OR'd with 0x8000 (so the "wait until DSP responds" poll exits too).
+    // The OS reads the LOW half (0xCC005006) right after, which we use as
+    // the "message consumed" signal to reset bit 15 for the next cycle.
+    if (addr == 0xCC005004) {
+        static int read_count = 0;
+        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+        uint16_t v = ((uint16_t)p[0] << 8) | p[1];
+        if (read_count++ > 0) v |= 0x8000;
+        return v;
+    }
+    if (addr == 0xCC005006) {
+        // Mark the message as consumed — next 5004 read returns the raw value
+        // (bit 15 == 0) so a subsequent outbound cycle's "wait for clear"
+        // poll exits. Then increment read counter on next 5004 read flips
+        // bit 15 back on. (Effectively: each 5006 read primes a fresh cycle.)
+        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
+        return ((uint16_t)p[0] << 8) | p[1];
+    }
+
     const uint8_t* p = translate(addr);
     return ((uint16_t)p[0] << 8) | p[1];
 }
@@ -213,6 +276,17 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
         fflush(stdout);
     }
 
+    // ARAM DMA registers — when the game writes AR_DMA_CNT it kicks off
+    // an ARAM<->main-RAM DMA transfer. The DSPCR's ARINT bit (0x0020)
+    // sets when the transfer completes. With no DSP/ARAM emulation we
+    // signal "done" immediately by setting ARINT in DSPCR.
+    // Some games write AR_DMA_CNT as 32-bit, some as 16-bit halves;
+    // catch both the high (0x5028) and the canonical low (0x502A) names.
+    if (addr == 0xCC005028 || addr == 0xCC00502A) {
+        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
+        dspcr_p[1] |= 0x20; // ARINT
+    }
+
     // EXI DMA Control Register: when TSTART (bit 0) is set, immediately
     // complete the transfer by clearing it. On real hardware the EXI
     // controller does the DMA and clears TSTART when done.
@@ -239,12 +313,61 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
     p[3] = (uint8_t)val;
 }
 
+// 16-bit HW register HLE — covers DSP/AI ports which are 16-bit-addressable.
+// Pattern: game writes "start" bits (reset, DMA, transfer-in-progress) and
+// then polls the same register until those bits clear. Real hardware clears
+// them when the operation completes; without device emulation we just clear
+// them immediately so the poll exits.
+static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
+    static std::unordered_map<uint32_t, int> hw_w16_count;
+    int& count = hw_w16_count[addr];
+    if (count < 3) {
+        printf("[HW] Write16 0x%08X = 0x%04X\n", addr, val);
+        fflush(stdout);
+    }
+    count++;
+
+    // DSP Control/Status Register (0xCC00500A, 16-bit).
+    // Self-clearing bits: RES (0x0001), DSP_DMA (0x0200).
+    if (addr == 0xCC00500A) {
+        val &= ~0x0001u;  // RES — DSP reset completes instantly
+        val &= ~0x0200u;  // DSPDMA — DSP DMA "transfer complete"
+    }
+
+    // DSP Mailbox From CPU High (0xCC005004): bit 15 (0x8000) is the
+    // "message pending" status flag. The game writes the high half with
+    // 0x8000 set to signal "new message", then polls until the DSP
+    // (here, us) clears it. Without DSP emulation, clear it immediately
+    // so the message "send" loop exits.
+    if (addr == 0xCC005004) {
+        val &= ~0x8000u;
+    }
+
+    // AR DMA Count (0xCC005028/0xCC00502A) — when written, the ARAM DMA
+    // starts. DSPCR's ARINT bit (0x0020) sets when DMA completes; for
+    // emulated boot we tell the game "DMA already done" by setting ARINT
+    // in DSPCR's stored value.
+    if (addr == 0xCC005028 || addr == 0xCC00502A) {
+        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
+        // DSPCR is 16-bit big-endian; bit 5 = ARINT in the low byte.
+        dspcr_p[1] |= 0x20;
+    }
+
+    uint8_t* p = mem->hw_regs + (addr - Memory::HW_REG_BASE);
+    p[0] = (uint8_t)(val >> 8);
+    p[1] = (uint8_t)val;
+}
+
 // Big-endian writes
 void Memory::write8(uint32_t addr, uint8_t val) {
     *translate(addr) = val;
 }
 
 void Memory::write16(uint32_t addr, uint16_t val) {
+    if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
+        hw_write16_hle(this, addr, val);
+        return;
+    }
     uint8_t* p = translate(addr);
     p[0] = (uint8_t)(val >> 8);
     p[1] = (uint8_t)val;

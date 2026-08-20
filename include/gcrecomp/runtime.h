@@ -17,6 +17,7 @@
 // this header and link against the gcrecomp runtime library.
 // =============================================================================
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -304,6 +305,37 @@ uint64_t last_dispatch(uint32_t* addr, uint32_t* lr);
 extern PPCContext g_ctx;
 extern Memory     g_mem;
 extern FuncTable  g_func_table;
+
+// =============================================================================
+// Tracing — record the last N recompiled function entries
+//
+// When the recompiler is run with --trace, every generated function begins
+// with TRACE_ENTER(0xADDR) which calls gcrecomp::trace_enter. The ring
+// buffer is lock-free (atomic counter, 4096 entries, power-of-two mask).
+// Disabled by default — flip with trace_set_enabled(true) before invoking
+// recompiled code.
+//
+// trace_dump_recent(n) prints the last n entries in chronological order.
+// trace_dump_summary() prints a histogram of the most-called functions in
+// the ring, useful for diagnosing tight loops.
+// =============================================================================
+struct TraceRing {
+    static constexpr size_t SIZE = 4096; // power of two — fast mask
+    uint32_t entries[SIZE]{};
+    std::atomic<uint64_t> pos{0};
+};
+
+extern TraceRing  g_trace_ring;
+extern std::atomic<bool> g_trace_enabled;
+
+// Out-of-line definition (not inline) so the compiler can't elide the call
+// or fold trace_enter chains across recompiled-code TUs. The atomic load
+// cost is dominated by the call overhead at this point.
+void trace_enter(uint32_t addr);
+
+void trace_set_enabled(bool on);
+void trace_dump_recent(size_t n);
+void trace_dump_summary();
 
 // Initialize the runtime: allocate memory, reset CPU state, set up OS
 // low-memory globals, and register OS HLE function replacements.

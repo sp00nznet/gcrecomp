@@ -37,6 +37,24 @@ namespace gcrecomp {
         va_end(args);
     }
 
+    std::string PPCToCEmitter::name_for(uint32_t addr) const {
+        // A Ghidra symbol map, when supplied, carries real names rather
+        // than func_XXXXXXXX. Checked first so symbols apply at every
+        // naming site, not just direct branches.
+        if (syms) {
+            std::string n = syms->get_name(addr);
+            if (!n.empty() && n.rfind("func_", 0) != 0) return n;
+        }
+        if (func_map) {
+            auto it = func_map->find(addr);
+            if (it != func_map->end() && !it->second.name.empty())
+                return it->second.name;
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "func_%08X", addr);
+        return buf;
+    }
+
     void PPCToCEmitter::emit_insn(const PPCInsn& insn) {
         // Comment with original instruction
         emit("// 0x%08X: %s", insn.address, insn.mnemonic.c_str());
@@ -642,18 +660,18 @@ namespace gcrecomp {
                  insn.rd, insn.rb, insn.rd, insn.rd);
             break;
         case PPCInsnType::FCTIWZ:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; memcpy(&ctx->f[%u], &tmp, 8); }",
+            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
                  insn.rb, insn.rd);
             break;
         case PPCInsnType::FCTIW:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; memcpy(&ctx->f[%u], &tmp, 8); }",
+            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
                  insn.rb, insn.rd);
             break;
         case PPCInsnType::MFFS:
-            emit("{ uint64_t v = (uint64_t)ctx->fpscr; memcpy(&ctx->f[%u], &v, 8); }", insn.rd);
+            emit("{ uint64_t v = (uint64_t)ctx->fpscr; std::memcpy(&ctx->f[%u], &v, 8); }", insn.rd);
             break;
         case PPCInsnType::MTFSF:
-            emit("{ uint64_t v; memcpy(&v, &ctx->f[%u], 8); ctx->fpscr = (uint32_t)v; }", insn.rb);
+            emit("{ uint64_t v; std::memcpy(&v, &ctx->f[%u], 8); ctx->fpscr = (uint32_t)v; }", insn.rb);
             break;
 
         // ==== Float Compare ====
@@ -902,15 +920,16 @@ namespace gcrecomp {
         // ==== Branch ====
         case PPCInsnType::B:
             if (insn.link) {
-                std::string callee = syms
-                    ? syms->get_name(insn.branch_target)
-                    : (std::string("func_") + [&]{
-                          char b[16];
-                          snprintf(b, sizeof(b), "%08X", insn.branch_target);
-                          return std::string(b);
-                      }());
-                emit("ctx->lr = 0x%08Xu; %s(ctx, mem); // bl 0x%08X",
-                     insn.address + 4, callee.c_str(), insn.branch_target);
+                bool known = func_map && func_map->find(insn.branch_target) != func_map->end();
+                if (known) {
+                    emit("ctx->lr = 0x%08Xu; %s(ctx, mem); // bl", insn.address + 4, name_for(insn.branch_target).c_str());
+                } else {
+                    // Target not in CFG (e.g., `bla 0x60` into a low/vector address).
+                    // Route through the function table so it becomes a runtime
+                    // unresolved-call rather than a link-time error.
+                    emit("ctx->lr = 0x%08Xu; CALL_INDIRECT(0x%08Xu, ctx, mem); // bl (unresolved target)",
+                         insn.address + 4, insn.branch_target);
+                }
             } else {
                 emit("goto label_%08X; // b", insn.branch_target);
             }
@@ -987,10 +1006,15 @@ namespace gcrecomp {
             if (insn.link) {
                 emit("ctx->lr = 0x%08Xu; CALL_INDIRECT(ctx->ctr, ctx, mem); // bctrl", insn.address + 4);
             } else {
-                // Switch table: dispatch to a label within this function based on CTR value
-                emit("// bctr -- switch table dispatch");
+                // Switch table: use resolved jump table targets if available,
+                // otherwise fall back to all block addresses in this function.
+                // Jump table detection based on approach from ExpansionPak/GCRecompiler.
+                const auto& targets = current_block->jump_table_targets.empty()
+                    ? block_addrs : current_block->jump_table_targets;
+                emit("// bctr -- switch table dispatch%s",
+                     current_block->jump_table_targets.empty() ? " (unresolved)" : "");
                 emit("switch (ctx->ctr) {");
-                for (uint32_t addr : block_addrs) {
+                for (uint32_t addr : targets) {
                     emit("    case 0x%08Xu: goto label_%08X;", addr, addr);
                 }
                 emit("    default: CALL_INDIRECT(ctx->ctr, ctx, mem); break; // fallback: tail call");
@@ -1036,7 +1060,7 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::DCBZ:
-            emit("memset((void*)((uintptr_t)mem->translate(ctx->r[%u] + ctx->r[%u]) & ~31), 0, 32); // dcbz",
+            emit("std::memset((void*)((uintptr_t)mem->translate(ctx->r[%u] + ctx->r[%u]) & ~31), 0, 32); // dcbz",
                  insn.ra, insn.rb);
             break;
 
