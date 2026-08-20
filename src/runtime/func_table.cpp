@@ -22,6 +22,8 @@
 #include "gcrecomp/runtime.h"
 #include <cstdio>
 
+#include <atomic>
+
 namespace gcrecomp {
 
 FuncTable g_func_table;
@@ -36,8 +38,23 @@ RecompiledFunc FuncTable::lookup(uint32_t gc_addr) const {
     return nullptr;
 }
 
+// Last-dispatch probe (see last_dispatch() in runtime.h).
+static std::atomic<uint64_t> g_dispatch_seq{0};
+static std::atomic<uint32_t> g_dispatch_addr{0};
+static std::atomic<uint32_t> g_dispatch_lr{0};
+
+uint64_t last_dispatch(uint32_t* addr, uint32_t* lr) {
+    if (addr) *addr = g_dispatch_addr.load(std::memory_order_relaxed);
+    if (lr)   *lr   = g_dispatch_lr.load(std::memory_order_relaxed);
+    return g_dispatch_seq.load(std::memory_order_relaxed);
+}
+
 void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
     if (gc_addr == 0) return; // Null function pointer — skip silently
+
+    g_dispatch_addr.store(gc_addr, std::memory_order_relaxed);
+    g_dispatch_lr.store(ctx->lr, std::memory_order_relaxed);
+    g_dispatch_seq.fetch_add(1, std::memory_order_relaxed);
 
     // Basic sanity check: must be in GameCube RAM range and 4-byte aligned.
     // Valid code addresses are 0x80000000 - 0x82FFFFFF (up to 48 MB for Triforce).

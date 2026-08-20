@@ -285,6 +285,15 @@ struct FuncTable {
     void call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const;
 };
 
+// Last-dispatch probe, for diagnosing hangs.
+//
+// call() records every dispatch here. A watchdog can sample this: if the
+// returned sequence number stops moving, the game is spinning inside one
+// recompiled function and `addr` is the last one entered; if it keeps moving
+// but `addr` repeats, it is looping over a call.
+// Returns the dispatch sequence number; `addr`/`lr` may be null.
+uint64_t last_dispatch(uint32_t* addr, uint32_t* lr);
+
 // =============================================================================
 // Global runtime state
 //
