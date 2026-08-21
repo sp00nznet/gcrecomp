@@ -1014,7 +1014,12 @@ namespace gcrecomp {
                 emit("// bctr -- switch table dispatch%s",
                      current_block->jump_table_targets.empty() ? " (unresolved)" : "");
                 emit("switch (ctx->ctr) {");
+                // A jump table routinely maps several indices onto one case
+                // body, so the same target appears more than once; C needs
+                // each case label exactly once.
+                std::set<uint32_t> emitted;
                 for (uint32_t addr : targets) {
+                    if (!emitted.insert(addr).second) continue;
                     emit("    case 0x%08Xu: goto label_%08X;", addr, addr);
                 }
                 emit("    default: CALL_INDIRECT(ctx->ctr, ctx, mem); break; // fallback: tail call");

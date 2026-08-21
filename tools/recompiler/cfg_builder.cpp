@@ -6,12 +6,22 @@
 
 #include "gcrecomp/cfg.h"
 #include <cstdio>
+#include <cstdlib>
 #include <queue>
 #include <algorithm>
 
 namespace gcrecomp {
 
 namespace {
+
+// Both CFG changes below are correct about what they measure but are not yet
+// safe to ship: entry gating alone, and jump-table resolution alone, each
+// crash Wind Waker during game init. Opt in with GCRECOMP_EXPERIMENTAL_CFG=1
+// while working on them; the default is the behaviour that runs.
+bool experimental_cfg() {
+    static const bool on = std::getenv("GCRECOMP_EXPERIMENTAL_CFG") != nullptr;
+    return on;
+}
 
 // Does `addr` begin a function, or land mid-way through one?
 //
@@ -27,6 +37,7 @@ namespace {
 // touches r1 at all. Reaching a pop (addi r1, r1, +N) or an mtlr with no
 // preceding push means we are standing in somebody else's epilogue.
 bool looks_like_function_entry(uint32_t addr, const DOLFile& dol) {
+    if (!experimental_cfg()) return true;
     constexpr int kMaxScan = 96;   // longest plausible prologue-to-epilogue run
     constexpr uint32_t kSprLR = 8;
 
@@ -428,117 +439,90 @@ void CFG::build_blocks(Function& func, const DOLFile& dol) {
 //
 // Inspired by ExpansionPak/GCRecompiler's jump table detection approach.
 std::vector<uint32_t> CFG::detect_jump_table(const Function& func, uint32_t bctr_addr, const DOLFile& dol) {
+    (void)func;
     std::vector<uint32_t> targets;
+    if (!experimental_cfg()) return targets;
 
-    // Collect instructions leading up to bctr (up to 12 instructions back)
+    // Read the run leading up to the bctr straight out of the image rather
+    // than from func.blocks. This is called both while block boundaries are
+    // still being discovered (func.blocks empty) and while the block holding
+    // the bctr is mid-construction and not yet inserted, so a window built
+    // from func.blocks never contains the bctr and detection always failed.
+    constexpr int kWindow = 24;
     std::vector<PPCInsn> window;
-    for (const auto& [addr, block] : func.blocks) {
-        for (const auto& insn : block.instructions) {
-            window.push_back(insn);
-        }
+    for (int i = kWindow; i >= 0; i--) {
+        uint32_t at = bctr_addr - (uint32_t)i * 4;
+        if (at > bctr_addr || !dol.is_code(at)) { window.clear(); continue; }
+        window.push_back(ppc_disasm(dol.read32(at), at));
     }
+    if (window.empty()) return targets;
 
-    // Find the bctr in the window
-    int bctr_idx = -1;
-    for (int i = 0; i < (int)window.size(); i++) {
-        if (window[i].address == bctr_addr) {
-            bctr_idx = i;
-            break;
-        }
-    }
-    if (bctr_idx < 0) return targets;
-
-    // Backscan for mtctr, lwzx, lis+addi/ori (table base), cmplwi (bounds)
-    uint32_t table_base = 0;
+    // Scan forward, tracking what each register holds. Backwards would meet
+    // the addi before the lis that feeds it, which is why the original pair
+    // match never completed.
+    uint32_t reg_val[32] = {0};
+    bool     reg_set[32] = {false};
     uint32_t table_count = 0;
-    bool found_mtctr = false;
-    bool found_lwzx = false;
-    bool found_base = false;
-    bool found_bounds = false;
-    uint32_t lis_hi = 0;
-    uint32_t base_reg = 0;
+    bool     found_bounds = false;
+    // The chain has to actually connect: the register moved to CTR must be
+    // the one lwzx loaded, and lwzx must be indexing the base a lis/addi pair
+    // built. Matching the four opcodes independently -- as this did -- fires on
+    // any nearby lis, and a bogus table turns `bctr` into a goto to nowhere.
+    uint32_t lwzx_rd = 32, lwzx_ra = 32, lwzx_rb = 32;
+    uint32_t mtctr_rs = 32;
 
-    int scan_start = (bctr_idx > 12) ? bctr_idx - 12 : 0;
-    for (int i = bctr_idx - 1; i >= scan_start; i--) {
-        const PPCInsn& insn = window[i];
-        uint32_t op = PPC_OP(insn.raw);
-        uint32_t xo = PPC_XO(insn.raw);
+    for (const PPCInsn& insn : window) {
+        const uint32_t raw = insn.raw;
+        const uint32_t op = PPC_OP(raw), xo = PPC_XO(raw);
+        const uint32_t rd = PPC_RD(raw), ra = PPC_RA(raw), rb = (raw >> 11) & 0x1F;
+        const uint32_t imm = raw & 0xFFFF;
 
-        // mtctr rZ (mtspr 9, rZ) — opcode 31, XO 467, SPR 9
-        if (op == 31 && xo == 467 && PPC_SPR(insn.raw) == 9) {
-            found_mtctr = true;
-            continue;
-        }
-
-        // lwzx rD, rA, rB — opcode 31, XO 23
-        if (op == 31 && xo == 23) {
-            found_lwzx = true;
-            base_reg = PPC_RA(insn.raw);
-            continue;
-        }
-
-        // lis rD, imm (addis rD, 0, imm) — opcode 15, rA=0
-        if (op == 15 && PPC_RA(insn.raw) == 0) {
-            lis_hi = (uint32_t)(int16_t)(insn.raw & 0xFFFF) << 16;
-            continue;
-        }
-
-        // addi rD, rA, imm — opcode 14 (completes lis+addi pair)
-        if (op == 14 && lis_hi != 0) {
-            table_base = lis_hi + (int16_t)(insn.raw & 0xFFFF);
-            found_base = true;
-            continue;
-        }
-
-        // ori rD, rA, imm — opcode 24 (alternate: lis+ori pair)
-        if (op == 24 && lis_hi != 0) {
-            table_base = lis_hi | (insn.raw & 0xFFFF);
-            found_base = true;
-            continue;
-        }
-
-        // cmplwi rA, imm (cmpli crfD, 0, rA, UIMM) — opcode 10
-        if (op == 10) {
-            table_count = insn.raw & 0xFFFF;
+        if (op == 15 && ra == 0) {                    // lis rD, imm
+            reg_val[rd] = imm << 16; reg_set[rd] = true;
+        } else if (op == 14) {                        // addi rD, rA, simm
+            if (reg_set[ra]) {
+                reg_val[rd] = reg_val[ra] + (uint32_t)(int32_t)(int16_t)imm;
+                reg_set[rd] = true;
+            } else {
+                reg_set[rd] = false;
+            }
+        } else if (op == 24) {                        // ori rA, rS, imm
+            if (reg_set[rd]) { reg_val[ra] = reg_val[rd] | imm; reg_set[ra] = true; }
+            else             { reg_set[ra] = false; }
+        } else if (op == 31 && xo == 23) {            // lwzx rD, rA, rB
+            lwzx_rd = rd; lwzx_ra = ra; lwzx_rb = rb;
+        } else if (op == 31 && xo == 467 && PPC_SPR(raw) == 9) {  // mtctr rS
+            mtctr_rs = rd;                            // rS sits in the rD field
+        } else if (op == 10 || op == 11) {            // cmplwi / cmpwi rA, N
+            table_count = (op == 10) ? imm : (uint32_t)(int32_t)(int16_t)imm;
             found_bounds = true;
-            continue;
-        }
-
-        // cmpwi rA, imm (cmpi crfD, 0, rA, SIMM) — opcode 11
-        if (op == 11) {
-            table_count = (uint32_t)(int16_t)(insn.raw & 0xFFFF);
-            found_bounds = true;
-            continue;
         }
     }
 
-    if (!found_mtctr || !found_lwzx || !found_base || !found_bounds) {
-        return targets;
+    if (mtctr_rs == 32 || lwzx_rd == 32 || !found_bounds) return targets;
+    if (mtctr_rs != lwzx_rd) return targets;          // CTR not fed by the load
+
+    // Whichever operand of the lwzx carries the table address.
+    uint32_t table_base = 0;
+    if (lwzx_ra < 32 && reg_set[lwzx_ra])      table_base = reg_val[lwzx_ra];
+    else if (lwzx_rb < 32 && reg_set[lwzx_rb]) table_base = reg_val[lwzx_rb];
+    else return targets;
+    const bool found_mtctr = true, found_lwzx = true, found_base = table_base != 0;
+
+    if (!found_mtctr || !found_lwzx || !found_base || !found_bounds) return targets;
+    if (table_count == 0 || table_count > 512) return targets;
+
+    // The compare bounds the index but its exact form (bgt vs bge) decides
+    // whether the last case is included, so read one extra entry and let the
+    // is_code check end the table.
+    for (uint32_t i = 0; i <= table_count; i++) {
+        uint32_t target = dol.read32(table_base + i * 4);
+        if (target == 0 || !dol.is_code(target)) break;
+        targets.push_back(target);
     }
-
-    // Sanity check: table count should be reasonable
-    if (table_count == 0 || table_count > 512) {
-        return targets;
-    }
-
-    // Read the jump table entries from the DOL
-    // The bounds check is typically "cmplwi rX, N" where N is the number of cases
-    // (the branch skips the table if index >= N, so we have N+1 entries including case 0..N-1)
-    printf("[CFG] Detected jump table at 0x%08X: base=0x%08X, %u entries (bctr at 0x%08X)\n",
-           table_base, table_base, table_count, bctr_addr);
-
-    for (uint32_t i = 0; i < table_count; i++) {
-        uint32_t entry_addr = table_base + i * 4;
-        uint32_t target = dol.read32(entry_addr);
-        if (target == 0) continue;
-        if (dol.is_code(target)) {
-            targets.push_back(target);
-        }
-    }
-
-    printf("[CFG] Resolved %zu jump table targets\n", targets.size());
     return targets;
 }
+
 
 void CFG::print_stats() const {
     uint32_t total_blocks = 0;
