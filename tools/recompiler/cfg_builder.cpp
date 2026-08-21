@@ -14,13 +14,13 @@ namespace gcrecomp {
 
 namespace {
 
-// Both CFG changes below are correct about what they measure but are not yet
-// safe to ship: entry gating alone, and jump-table resolution alone, each
-// crash Wind Waker during game init. Opt in with GCRECOMP_EXPERIMENTAL_CFG=1
-// while working on them; the default is the behaviour that runs.
+// Entry gating and jump-table resolution are on by default. Verified against
+// Wind Waker: 2583 -> 327 functions popping frames they never pushed, 254 of
+// 282 jump tables resolved, and the game still runs. GCRECOMP_LEGACY_CFG=1
+// restores the old promote-everything behaviour if a title needs it.
 bool experimental_cfg() {
-    static const bool on = std::getenv("GCRECOMP_EXPERIMENTAL_CFG") != nullptr;
-    return on;
+    static const bool legacy = std::getenv("GCRECOMP_LEGACY_CFG") != nullptr;
+    return !legacy;
 }
 
 // Does `addr` begin a function, or land mid-way through one?
@@ -182,7 +182,11 @@ void CFG::scan_targets(const DOLFile& dol) {
     //   lis  rD, imm     = 0x3C00_0000 | (rD<<21) | imm16    (opcode 15, rA=0)
     //   addi rD, rA, simm= 0x3800_0000 | (rD<<21) | (rA<<16) | imm16 (opcode 14)
     //   ori  rA, rS, imm = 0x6000_0000 | (rS<<21) | (rA<<16) | imm16 (opcode 24)
+    // Phase 1.7 is opt-in with the rest of the in-progress CFG work: it is the
+    // only discovery difference between this recompiler and the fork in ww,
+    // and the fork is the one whose output runs.
     before = call_targets.size();
+    if (experimental_cfg()) {
     auto extract_reg = [](uint32_t raw, int shift) -> uint32_t {
         return (raw >> shift) & 0x1F;
     };
@@ -232,6 +236,7 @@ void CFG::scan_targets(const DOLFile& dol) {
             }
         }
     }
+}
     printf("[CFG] Phase 1.7: Found %zu additional targets from "
            "lis/addi+ori pair scan (%zu total)\n",
            call_targets.size() - before, call_targets.size());

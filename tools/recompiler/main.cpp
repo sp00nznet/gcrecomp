@@ -286,6 +286,16 @@ int main(int argc, char** argv) {
     if (!rel_mode) {
         char path[512];
         snprintf(path, sizeof(path), "%s/recomp_common.h", output_dir.c_str());
+        // Do not clobber an existing one. This header is what binds every
+        // generated function to a particular runtime -- which g_mem and
+        // g_func_table they touch -- so a project that supplies its own
+        // must keep it. Overwriting it compiles cleanly and then reads and
+        // writes an entirely different, uninitialised Memory at run time.
+        if (FILE* existing = fopen(path, "r")) {
+            fclose(existing);
+            printf("[*] Keeping existing %s (project-supplied runtime bindings)\n",
+                   path);
+        } else {
         FILE* common = fopen(path, "w");
         if (common) {
             fprintf(common, "#pragma once\n");
@@ -324,6 +334,7 @@ int main(int argc, char** argv) {
             fprintf(common, "#define PSQ_STORE_ONE(val, addr, gqr)         psq_store_one(g_mem, val, static_cast<uint32_t>(addr), gqr)\n");
             fprintf(common, "#define PSQ_STORE_PAIR(v0, v1, addr, gqr)     psq_store_pair(g_mem, v0, v1, static_cast<uint32_t>(addr), gqr)\n");
             fclose(common);
+        }
         }
     }
 
