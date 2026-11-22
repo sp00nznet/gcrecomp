@@ -385,6 +385,10 @@ decoder, or documentation for a hardware quirk — helps the whole community.
 
 Built with love for the games that defined a generation.
 
+## AI assistance
+
+The changes made in this fork (To-Recomp) are developed with the help of AI coding assistants (large language models): a large part of the code, tests, documentation and issues is written by AI agents; the maintainer directs the work and reviews it. The result can still contain mistakes: check what matters to you before relying on it. Contributions are under the licence of this repository (MIT).
+
 ---
 
 *"The GameCube may be small, but its games are enormous."*
