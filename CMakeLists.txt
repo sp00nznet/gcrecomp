@@ -28,6 +28,7 @@ endif()
 option(GCRECOMP_BUILD_TOOLS "Build recompiler tools" ON)
 option(GCRECOMP_BUILD_RUNTIME "Build the game runtime libraries" ON)
 option(GCRECOMP_BUILD_EXAMPLE "Build the example launcher" ON)
+option(GCRECOMP_FETCH_SDL3 "Download and build SDL3 with FetchContent instead of using an installed one" OFF)
 # Unit tests (CTest): on when gcrecomp is the top-level project, off when it is added as a subdirectory.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     option(GCRECOMP_BUILD_TESTS "Build the unit tests" ON)
@@ -62,6 +63,9 @@ if(GCRECOMP_BUILD_RUNTIME)
     target_include_directories(gcrecomp_runtime PUBLIC include)
     find_package(Threads REQUIRED)
     target_link_libraries(gcrecomp_runtime PUBLIC Threads::Threads)
+    if(WIN32)
+        target_link_libraries(gcrecomp_runtime PUBLIC winmm)  # timeBeginPeriod
+    endif()
     target_link_libraries(gcrecomp_runtime PUBLIC gcrecomp_audio)
 
     # GX Graphics (D3D11 backend)
@@ -105,37 +109,66 @@ if(GCRECOMP_BUILD_RUNTIME)
         target_link_libraries(gcrecomp_input PRIVATE xinput)
     endif()
 
-    # GP: consumes the GX command stream written by the recompiled SDK and draws it with OpenGL
-    # through SDL3 (Linux). Requires SDL3 and OpenGL development files.
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(SDL3 QUIET sdl3)
+    # SDL3 (audio output and the GP window/GL context). Resolved, in order, from:
+    #   1. FetchContent, when -DGCRECOMP_FETCH_SDL3=ON (CI, or no system SDL3);
+    #   2. find_package(SDL3 CONFIG) (vcpkg, SDL3 release archives, distro cmake packages);
+    #   3. pkg-config (sdl3.pc).
+    # Whatever is found is exposed as the INTERFACE target gcrecomp_sdl3.
+    if(GCRECOMP_FETCH_SDL3)
+        include(FetchContent)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(SDL3
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG release-3.2.28
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(SDL3)
+        set(GCRECOMP_SDL3_TARGET SDL3::SDL3-static)
+    else()
+        find_package(SDL3 CONFIG QUIET)
+        if(TARGET SDL3::SDL3)
+            set(GCRECOMP_SDL3_TARGET SDL3::SDL3)
+        elseif(TARGET SDL3::SDL3-shared)
+            set(GCRECOMP_SDL3_TARGET SDL3::SDL3-shared)
+        else()
+            find_package(PkgConfig QUIET)
+            if(PkgConfig_FOUND)
+                pkg_check_modules(SDL3_PC QUIET IMPORTED_TARGET sdl3)
+                if(SDL3_PC_FOUND)
+                    set(GCRECOMP_SDL3_TARGET PkgConfig::SDL3_PC)
+                endif()
+            endif()
+        endif()
     endif()
-    if(SDL3_FOUND)
+    if(GCRECOMP_SDL3_TARGET)
+        add_library(gcrecomp_sdl3 INTERFACE)
+        target_link_libraries(gcrecomp_sdl3 INTERFACE ${GCRECOMP_SDL3_TARGET})
         # Audio output through SDL3 (the null sink is always available).
         target_compile_definitions(gcrecomp_audio PRIVATE GCRECOMP_HAVE_SDL3)
-        target_include_directories(gcrecomp_audio PRIVATE ${SDL3_INCLUDE_DIRS})
-        target_link_libraries(gcrecomp_audio PUBLIC ${SDL3_LINK_LIBRARIES})
-        target_link_directories(gcrecomp_audio PUBLIC ${SDL3_LIBRARY_DIRS})
-        find_package(OpenGL QUIET)
+        target_link_libraries(gcrecomp_audio PUBLIC gcrecomp_sdl3)
+        # GP: consumes the GX command stream written by the recompiled SDK and draws it with OpenGL 3.3.
+        # The GL entry points are loaded at run time through SDL_GL_GetProcAddress (src/gp/gl_loader.*),
+        # so no libGL / opengl32 is linked.
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
             src/gp/gp_parser.cpp
             src/gp/lighting.cpp
             src/gp/gl_renderer.cpp
+            src/gp/gl_loader.cpp
             src/gp/input.cpp
             src/gp/efb_copy.cpp
             src/gp/gp_decode.cpp
         )
         target_include_directories(gcrecomp_gp PUBLIC include)
-        target_include_directories(gcrecomp_gp PRIVATE ${SDL3_INCLUDE_DIRS})
         # The texture decoders live in gcrecomp_gx.
-        target_link_libraries(gcrecomp_gp PUBLIC gcrecomp_gx ${SDL3_LINK_LIBRARIES} GL)
-        target_link_directories(gcrecomp_gp PUBLIC ${SDL3_LIBRARY_DIRS})
+        target_link_libraries(gcrecomp_gp PUBLIC gcrecomp_gx gcrecomp_sdl3)
         if(GCRECOMP_BUILD_TESTS)
             enable_testing()
             add_executable(gcrecomp_input_tests tests/input_tests.cpp)
-            target_include_directories(gcrecomp_input_tests PRIVATE include src/gp ${SDL3_INCLUDE_DIRS})
+            target_include_directories(gcrecomp_input_tests PRIVATE include src/gp)
             target_link_libraries(gcrecomp_input_tests PRIVATE gcrecomp_gp gcrecomp_runtime)
             add_test(NAME input COMMAND gcrecomp_input_tests)
             add_executable(gp_decode_test tests/gp_decode_test.cpp)
@@ -218,9 +251,10 @@ if(GCRECOMP_BUILD_TOOLS)
 endif()
 
 # ===========================================================================
-# Example Launcher (shows how to use gcrecomp in a game project)
+# Example Launcher (shows how to use gcrecomp in a game project). It uses the D3D11 gx backend, so it is
+# Windows-only; on other platforms it does not link (the backend is empty).
 # ===========================================================================
-if(GCRECOMP_BUILD_EXAMPLE AND GCRECOMP_BUILD_RUNTIME)
+if(GCRECOMP_BUILD_EXAMPLE AND GCRECOMP_BUILD_RUNTIME AND WIN32)
     add_executable(gcrecomp_example
         src/example/main.cpp
     )
