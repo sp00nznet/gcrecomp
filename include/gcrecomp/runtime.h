@@ -322,6 +322,8 @@ struct PadState {
     uint16_t buttons = 0;  // PAD_BUTTON_* bits: LEFT 1, RIGHT 2, DOWN 4, UP 8, Z 0x10, R 0x20, L 0x40, A 0x100, B 0x200, X 0x400, Y 0x800, START 0x1000
     int8_t stick_x = 0, stick_y = 0, substick_x = 0, substick_y = 0;
     uint8_t trigger_l = 0, trigger_r = 0;
+    bool connected = false;  // PADRead reports PAD_ERR_NO_CONTROLLER for the port when false
+    bool rumble = false;     // set by PADControlMotor, read by the window layer to drive the motor
 };
 extern PadState g_pad[4];
 extern FuncTable  g_func_table;

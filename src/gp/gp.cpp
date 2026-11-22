@@ -14,6 +14,7 @@
 
 #include "gcrecomp/runtime.h"
 #include "gp_internal.h"
+#include "input.h"
 
 namespace gcrecomp::gp {
 
@@ -566,12 +567,16 @@ bool init(const Config& config) {
     g_state.bp[0xFE] = 0xFFFFFF;
     g_graphics = renderer::init(config.window_width, config.window_height, config.screenshot_dir, config.max_screenshots);
     g_wgp_write = &wgp_write;
+    if (g_graphics) input::init(config.input_config);
     return g_graphics;
 }
 
 void shutdown() {
     g_wgp_write = nullptr;
-    if (g_graphics) renderer::shutdown();
+    if (g_graphics) {
+        input::shutdown();
+        renderer::shutdown();
+    }
     g_graphics = false;
 }
 

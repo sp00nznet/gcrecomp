@@ -21,6 +21,7 @@
 #include "gcrecomp/gx/gx.h"
 #include "gcrecomp/runtime.h"
 #include "gp_internal.h"
+#include "input.h"
 
 namespace gcrecomp::gx {
 // Defined in src/gx/gx_texture.cpp.
@@ -664,74 +665,13 @@ void copy_efb(const CopyRequest& r, const State& s) {
     }
 }
 
-// Keyboard mapping: arrows = D-pad and left stick, Enter or Z = A, X or Backspace = B, C = X, V = Y,
-// Space = Start, W = Z, Q = L, E = R.
-void update_pad_from_keyboard() {
-    const bool* k = SDL_GetKeyboardState(nullptr);
-    PadState& p = g_pad[0];
-    uint16_t b = 0;
-    if (k[SDL_SCANCODE_LEFT]) b |= 0x0001;
-    if (k[SDL_SCANCODE_RIGHT]) b |= 0x0002;
-    if (k[SDL_SCANCODE_DOWN]) b |= 0x0004;
-    if (k[SDL_SCANCODE_UP]) b |= 0x0008;
-    if (k[SDL_SCANCODE_W]) b |= 0x0010;
-    if (k[SDL_SCANCODE_E]) b |= 0x0020;
-    if (k[SDL_SCANCODE_Q]) b |= 0x0040;
-    if (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_Z]) b |= 0x0100;
-    if (k[SDL_SCANCODE_X] || k[SDL_SCANCODE_BACKSPACE]) b |= 0x0200;
-    if (k[SDL_SCANCODE_C]) b |= 0x0400;
-    if (k[SDL_SCANCODE_V]) b |= 0x0800;
-    if (k[SDL_SCANCODE_SPACE]) b |= 0x1000;
-    p.buttons = b;
-    p.stick_x = int8_t((k[SDL_SCANCODE_RIGHT] ? 80 : 0) - (k[SDL_SCANCODE_LEFT] ? 80 : 0));
-    p.stick_y = int8_t((k[SDL_SCANCODE_UP] ? 80 : 0) - (k[SDL_SCANCODE_DOWN] ? 80 : 0));
-    p.trigger_l = (b & 0x0040) ? 255 : 0;
-    p.trigger_r = (b & 0x0020) ? 255 : 0;
-    // Scripted input for tests: TOS_SCRIPT="frame:button,frame:button,..." holds a button for five
-    // frames starting at each frame. Buttons: A B X Y S(tart) U D L R (D-pad).
-    struct Step {
-        int frame;
-        uint16_t mask;
-    };
-    static const std::vector<Step> script = [] {
-        std::vector<Step> steps;
-        const char* v = std::getenv("TOS_SCRIPT");
-        for (const char* c = v; c && *c;) {
-            const int frame = std::atoi(c);
-            const char* colon = std::strchr(c, ':');
-            if (!colon) break;
-            uint16_t mask = 0;
-            switch (colon[1]) {
-                case 'A': mask = 0x0100; break;
-                case 'B': mask = 0x0200; break;
-                case 'X': mask = 0x0400; break;
-                case 'Y': mask = 0x0800; break;
-                case 'S': mask = 0x1000; break;
-                case 'U': mask = 0x0008; break;
-                case 'D': mask = 0x0004; break;
-                case 'L': mask = 0x0001; break;
-                case 'R': mask = 0x0002; break;
-                default: break;
-            }
-            steps.push_back({frame, mask});
-            const char* comma = std::strchr(colon, ',');
-            if (!comma) break;
-            c = comma + 1;
-        }
-        return steps;
-    }();
-    static int frame = 0;
-    ++frame;
-    for (const Step& s : script)
-        if (frame >= s.frame && frame < s.frame + 5) p.buttons |= s.mask;
-}
-
 bool pump_events() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) g_closed = true;
+        input::handle_event(e);
     }
-    update_pad_from_keyboard();
+    input::update();
     return !g_closed;
 }
 

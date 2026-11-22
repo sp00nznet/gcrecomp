@@ -20,6 +20,8 @@ struct Config {
     const char* screenshot_dir = nullptr;
     // Stop writing screenshots after this many frames (0 = unlimited).
     int max_screenshots = 0;
+    // TOML file with the keyboard mapping (see src/gp/input.h); null or missing = defaults.
+    const char* input_config = nullptr;
 };
 
 // Creates the window and GL context and installs the write-gather pipe sink. Returns false when no
