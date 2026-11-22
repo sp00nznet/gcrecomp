@@ -47,6 +47,10 @@ GLuint g_fbo = 0, g_color = 0, g_depth = 0;
 GLuint g_vao = 0, g_vbo = 0, g_program = 0;
 GLuint g_white = 0;
 uint64_t g_indirect_draws = 0;
+// How often the game used the features that are only visible on screen, reported at shutdown.
+struct FeatureUse {
+    uint64_t c14x2_textures = 0, mip_textures = 0, fog_draws = 0, const_alpha_draws = 0, logic_op_draws = 0, early_z_passes = 0;
+} g_use;
 
 const char* kVertexShader = R"(#version 330 core
 layout(location = 0) in vec4 a_pos;
@@ -76,7 +80,8 @@ const char* kFragmentShader = R"(#version 330 core
 in vec4 v_c0;
 in vec4 v_c1;
 in vec3 v_uv[8];
-out vec4 o_color;
+layout(location = 0, index = 0) out vec4 o_color;
+layout(location = 0, index = 1) out vec4 o_src1;   // TEV alpha, for blend factors when a constant alpha replaces o_color.a
 
 uniform sampler2D u_tex0; uniform sampler2D u_tex1; uniform sampler2D u_tex2; uniform sampler2D u_tex3;
 uniform sampler2D u_tex4; uniform sampler2D u_tex5; uniform sampler2D u_tex6; uniform sampler2D u_tex7;
@@ -88,6 +93,7 @@ uniform vec4 u_konst[4];
 uniform vec4 u_fog_f;        // x: A, y: C
 uniform ivec4 u_fog_i;       // x: B magnitude, y: B shift, z: orthographic, w: type (0 off, 2 linear, 4-7 exp)
 uniform vec3 u_fog_color;
+uniform float u_const_alpha; // alpha written to the EFB when >= 0 (GXSetDstAlpha), else the TEV alpha
 uniform uvec2 u_alpha_cmp;   // x: comparison codes (c0 | c1 << 3 | logic << 6), y: refs (ref0 | ref1 << 8)
 
 vec4 sample_map(int map, vec2 uv) {
@@ -216,6 +222,8 @@ void main() {
     bool p0 = compare(c0, result.a, r0), p1 = compare(c1, result.a, r1);
     bool pass = logic == 0u ? (p0 && p1) : logic == 1u ? (p0 || p1) : logic == 2u ? (p0 != p1) : (p0 == p1);
     if (!pass) discard;
+    o_src1 = vec4(vec3(result.a), result.a);
+    if (u_const_alpha >= 0.0) result.a = u_const_alpha;
     o_color = result;
 }
 )";
@@ -310,6 +318,8 @@ GLuint texture_for_map(const State& s, int map) {
             glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, mip_dim(w, level), mip_dim(h, level), 0, GL_RGBA,
                          GL_UNSIGNED_BYTE, mip.data());
         }
+        if (fmt == kTexC14X2) ++g_use.c14x2_textures;
+        if (levels > 1) ++g_use.mip_textures;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, GLint(levels - 1));
         t.hash = hash;
@@ -380,16 +390,35 @@ void apply_state(const State& s) {
     }
     glDepthMask((zmode & 0x10) ? GL_TRUE : GL_FALSE);
 
-    const uint32_t blend = s.bp[0x41];
-    if (blend & 1) {
+    const BlendState blend = decode_blend(s.bp[0x41], s.bp[0x42]);
+    // Constant alpha: o_color.a carries the constant, so the blend factors that use the source alpha read
+    // the TEV alpha from the second shader output, and the alpha channel is written as it comes.
+    const bool const_alpha = blend.const_alpha;
+    auto factor = [&](uint32_t f, bool is_src) {
+        if (const_alpha && f == 4) return GLenum(GL_SRC1_COLOR);
+        if (const_alpha && f == 5) return GLenum(GL_ONE_MINUS_SRC1_COLOR);
+        return blend_factor(f, is_src);
+    };
+    if (blend.blend) {
         glEnable(GL_BLEND);
-        glBlendFunc(blend_factor((blend >> 8) & 7, true), blend_factor((blend >> 5) & 7, false));
-        glBlendEquation((blend & 0x800) ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD);
+        const GLenum src = factor(blend.src_factor, true), dst = factor(blend.dst_factor, false);
+        if (const_alpha) glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO);
+        else glBlendFunc(src, dst);
+        const GLenum rgb_eq = blend.subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD;
+        glBlendEquationSeparate(rgb_eq, const_alpha ? GL_FUNC_ADD : rgb_eq);
     } else {
         glDisable(GL_BLEND);
     }
-    glColorMask((blend & 8) ? GL_TRUE : GL_FALSE, (blend & 8) ? GL_TRUE : GL_FALSE, (blend & 8) ? GL_TRUE : GL_FALSE,
-                (blend & 0x10) ? GL_TRUE : GL_FALSE);
+    if (const_alpha) ++g_use.const_alpha_draws;
+    if (blend.logic_op) {
+        ++g_use.logic_op_draws;
+        glEnable(GL_COLOR_LOGIC_OP);
+        glLogicOp(GL_CLEAR + blend.logic_mode);  // GX_LO_* follows the GL enum order
+    } else {
+        glDisable(GL_COLOR_LOGIC_OP);
+    }
+    glUniform1f(glGetUniformLocation(g_program, "u_const_alpha"), const_alpha ? float(blend.const_alpha_value) / 255.0f : -1.0f);
+    glColorMask(blend.color_update, blend.color_update, blend.color_update, blend.alpha_update);
 
     // TEV stages.
     const int nstages = int(((s.bp[0x00] >> 10) & 0xF) + 1);
@@ -427,6 +456,7 @@ void apply_state(const State& s) {
     glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), cmp, refs);
 
     const FogParams fog = decode_fog(s.bp);
+    if (fog.type != kFogOff) ++g_use.fog_draws;
     glUniform4f(glGetUniformLocation(g_program, "u_fog_f"), fog.a, fog.c, 0.0f, 0.0f);
     glUniform4i(glGetUniformLocation(g_program, "u_fog_i"), GLint(fog.b_mag), GLint(fog.b_shift), fog.ortho ? 1 : 0,
                 GLint(fog.type));
@@ -548,6 +578,9 @@ bool init(int window_w, int window_h, const char* screenshot_dir, int max_screen
 }
 
 void shutdown() {
+    std::fprintf(stderr, "[GL] feature use: C14X2 textures %llu, mipmapped textures %llu, fog draws %llu, constant-alpha draws %llu, logic-op draws %llu, early-Z passes %llu\n",
+                 (unsigned long long)g_use.c14x2_textures, (unsigned long long)g_use.mip_textures, (unsigned long long)g_use.fog_draws,
+                 (unsigned long long)g_use.const_alpha_draws, (unsigned long long)g_use.logic_op_draws, (unsigned long long)g_use.early_z_passes);
     if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
     if (g_context) SDL_GL_DestroyContext(g_context);
     if (g_window) SDL_DestroyWindow(g_window);
@@ -647,6 +680,7 @@ void draw(const DrawCall& call, const State& s) {
         // draw without color and without the alpha test; pixels that passed already wrote their depth
         // and fail the depth test against themselves, the rejected ones write it now. apply_state
         // restores the color mask and the alpha test uniform for the next draw.
+        ++g_use.early_z_passes;
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
         glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), 7u | (7u << 3), 0u);
         glDrawArrays(mode, 0, GLsizei(count));

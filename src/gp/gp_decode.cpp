@@ -240,4 +240,20 @@ bool early_z_writes_rejected_pixels(const uint32_t* bp) {
     return early && depth_test && depth_write && alpha_test_can_reject(bp[0xF3]);
 }
 
+BlendState decode_blend(uint32_t cmode0, uint32_t cmode1) {
+    BlendState b;
+    b.blend = cmode0 & 1;
+    b.subtract = (cmode0 >> 11) & 1;
+    b.logic_mode = (cmode0 >> 12) & 15;
+    // The hardware ignores the logic op while blending is on; the copy op is a plain write.
+    b.logic_op = ((cmode0 >> 1) & 1) && !b.blend && b.logic_mode != 3;
+    b.color_update = (cmode0 >> 3) & 1;
+    b.alpha_update = (cmode0 >> 4) & 1;
+    b.dst_factor = (cmode0 >> 5) & 7;
+    b.src_factor = (cmode0 >> 8) & 7;
+    b.const_alpha = (cmode1 >> 8) & 1;
+    b.const_alpha_value = uint8_t(cmode1);
+    return b;
+}
+
 }  // namespace gcrecomp::gp

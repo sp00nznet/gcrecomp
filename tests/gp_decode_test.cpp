@@ -264,6 +264,30 @@ static void test_early_z() {
     CHECK(!early_z_writes_rejected_pixels(bp));
 }
 
+static void test_blend_decode() {
+    // GXSetBlendMode(GX_BM_BLEND, SRCALPHA, INVSRCALPHA), color and alpha update on.
+    BlendState b = decode_blend(1 | 8 | 0x10 | (5u << 5) | (4u << 8), 0);
+    CHECK(b.blend && !b.logic_op && !b.subtract && b.color_update && b.alpha_update);
+    CHECK(b.src_factor == 4 && b.dst_factor == 5);
+    CHECK(!b.const_alpha);
+    // GXSetBlendMode(GX_BM_SUBTRACT, ...) sets blend and the subtract bit.
+    b = decode_blend(1 | 0x800, 0);
+    CHECK(b.blend && b.subtract);
+    // GX_BM_LOGIC with GX_LO_XOR: bit 1 and the op in bits 12-15.
+    b = decode_blend(2 | 8 | (6u << 12), 0);
+    CHECK(!b.blend && b.logic_op && b.logic_mode == 6);
+    // Highest op code must not be cut off.
+    CHECK(decode_blend(2 | (15u << 12), 0).logic_mode == 15);
+    // GX_LO_COPY is an ordinary write, and a logic op is ignored while blending.
+    CHECK(!decode_blend(2 | (3u << 12), 0).logic_op);
+    CHECK(!decode_blend(3 | (6u << 12), 0).logic_op);
+    // GXSetDstAlpha(GX_ENABLE, 0x80).
+    b = decode_blend(0, 0x180);
+    CHECK(b.const_alpha && b.const_alpha_value == 0x80);
+    b = decode_blend(0, 0x0FF);  // alpha set but not enabled
+    CHECK(!b.const_alpha && b.const_alpha_value == 0xFF);
+}
+
 int main() {
     test_c14x2();
     test_c14x2_out_of_range();
@@ -277,6 +301,7 @@ int main() {
     test_indirect_detection();
     test_alpha_test_can_reject();
     test_early_z();
+    test_blend_decode();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

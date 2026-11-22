@@ -112,4 +112,25 @@ bool alpha_test_can_reject(uint32_t alpha_compare);
 // depth update enabled (BP 0x40), and an alpha test that can reject.
 bool early_z_writes_rejected_pixels(const uint32_t* bp);
 
+// ---- Blend mode, logic ops and constant alpha ---------------------------------------------------
+//
+// BP 0x41 CMODE0: bit 0 blend, bit 1 logic op, bit 3 color update, bit 4 alpha update, bits 5-7
+// destination factor, bits 8-10 source factor, bit 11 subtract, bits 12-15 logic op. BP 0x42 CMODE1
+// (GXSetDstAlpha): bits 0-7 constant alpha, bit 8 enable. The constant replaces the alpha that is
+// written to the EFB; blend factors that use the source alpha keep using the TEV alpha.
+
+struct BlendState {
+    bool blend = false;
+    bool subtract = false;
+    bool logic_op = false;     // a logic op replaces the blend: set only when blending is off
+    uint32_t logic_mode = 3;   // GX_LO_*: 0 clear, 1 and, 2 and-reverse, 3 copy, 4 and-inverted, 5 noop, 6 xor, 7 or,
+                               // 8 nor, 9 equiv, 10 invert, 11 or-reverse, 12 copy-inverted, 13 or-inverted, 14 nand, 15 set
+    bool color_update = false, alpha_update = false;
+    uint32_t src_factor = 0, dst_factor = 0;  // GX_BL_*: 0 zero, 1 one, 2 src/dst color, 3 inverse, 4 src alpha, 5 inverse, 6 dst alpha, 7 inverse
+    bool const_alpha = false;
+    uint8_t const_alpha_value = 0;
+};
+
+BlendState decode_blend(uint32_t cmode0, uint32_t cmode1);
+
 }  // namespace gcrecomp::gp
