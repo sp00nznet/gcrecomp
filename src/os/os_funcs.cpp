@@ -31,6 +31,7 @@
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
 #include "gcrecomp/threads.h"
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,6 +65,9 @@ uint64_t sched::timebase_now() {
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - g_start_time);
     return (uint64_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
 }
+// Interrupts do not preempt recompiled code: pending ones (the AI DMA callback) are delivered where
+// the game can be interrupted and polls, if it has interrupts enabled.
+static void deliver_interrupts(PPCContext* ctx, Memory* mem);
 
 // OSGetTime: returns 64-bit timebase ticks (40.5 MHz)
 // Return convention: high 32 bits in r3, low 32 bits in r4
@@ -71,6 +75,7 @@ static void os_get_time(PPCContext* ctx, Memory* mem) {
     uint64_t ticks = sched::timebase_now();
     ctx->r[3] = (uint32_t)(ticks >> 32);
     ctx->r[4] = (uint32_t)ticks;
+    deliver_interrupts(ctx, mem);
 }
 
 // OSGetTick: returns lower 32-bit of timebase in r3
@@ -78,6 +83,7 @@ static void os_get_tick(PPCContext* ctx, Memory* mem) {
     auto now = std::chrono::high_resolution_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - g_start_time);
     ctx->r[3] = (uint32_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
+    deliver_interrupts(ctx, mem);
 }
 
 // OSTicksToMilliseconds helper (the game may inline this, but provided as fallback)
@@ -101,6 +107,10 @@ static void os_ticks_to_ms(PPCContext* ctx, Memory* mem) {
 
 // The interrupt state belongs to the guest thread: see sched::interrupts_exchange.
 
+static void deliver_interrupts(PPCContext* ctx, Memory* mem) {
+    if (sched::interrupts_enabled()) ai_poll(ctx, mem);
+}
+
 // OSDisableInterrupts: returns previous state in r3
 static void os_disable_interrupts(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = sched::interrupts_exchange(false) ? 1 : 0;
@@ -109,11 +119,13 @@ static void os_disable_interrupts(PPCContext* ctx, Memory* mem) {
 // OSEnableInterrupts: returns previous state in r3
 static void os_enable_interrupts(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = sched::interrupts_exchange(true) ? 1 : 0;
+    deliver_interrupts(ctx, mem);
 }
 
 // OSRestoreInterrupts: restore from saved state (r3 = saved state)
 static void os_restore_interrupts(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = sched::interrupts_exchange(ctx->r[3] != 0) ? 1 : 0;
+    deliver_interrupts(ctx, mem);
 }
 
 // =============================================================================
@@ -583,6 +595,39 @@ struct DVDFileEntry {
 static std::string g_game_root;  // Root directory of extracted game files
 static std::unordered_map<uint32_t, FILE*> g_open_dvd_files;  // fileinfo addr -> FILE*
 
+// The disc's file system is case-insensitive; the host's usually is not (the game asks for "s/se.snd"
+// where the extracted disc has "S/se.snd"). Returns `path` below `root` with each component matched
+// ignoring case, or an empty string when there is no such file.
+static std::string resolve_disc_path(const std::string& root, const std::string& path) {
+    namespace fs = std::filesystem;
+    fs::path current = root;
+    size_t pos = 0;
+    while (pos < path.size()) {
+        size_t end = path.find_first_of("/\\", pos);
+        if (end == std::string::npos) end = path.size();
+        const std::string part = path.substr(pos, end - pos);
+        pos = end + 1;
+        if (part.empty() || part == ".") continue;
+        std::error_code ec;
+        if (fs::exists(current / part, ec)) {
+            current /= part;
+            continue;
+        }
+        bool found = false;
+        for (const auto& entry : fs::directory_iterator(current, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (name.size() == part.size() &&
+                std::equal(name.begin(), name.end(), part.begin(), [](char a, char b) { return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); })) {
+                current /= name;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return {};
+    }
+    return current.string();
+}
+
 // DVDOpen(const char* path, DVDFileInfo* info) -> BOOL
 static void dvd_open(PPCContext* ctx, Memory* mem) {
     uint32_t path_addr = ctx->r[3];
@@ -605,6 +650,10 @@ static void dvd_open(PPCContext* ctx, Memory* mem) {
     }
 
     FILE* fp = fopen(host_path.c_str(), "rb");
+    if (!fp) {
+        const std::string resolved = resolve_disc_path(g_game_root, path);
+        if (!resolved.empty()) fp = fopen(resolved.c_str(), "rb");
+    }
     if (fp) {
         fseek(fp, 0, SEEK_END);
         uint32_t file_size = (uint32_t)ftell(fp);
@@ -932,6 +981,7 @@ void hle_dump(size_t top) {
 static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
     g_vi_retrace_count++;
     if (g_retrace_hook) g_retrace_hook();
+    deliver_interrupts(ctx, mem);
     sched::retrace_wait(ctx, mem, 16667);
 }
 
@@ -968,10 +1018,6 @@ static void os_init_system_call_stub(PPCContext* ctx, Memory* mem) {
 
 static void ps_init_stub(PPCContext* ctx, Memory* mem) {
     printf("[OS] PSInit\n");
-}
-
-static void ai_init_stub(PPCContext* ctx, Memory* mem) {
-    printf("[AI] AIInit\n");
 }
 
 static void dsp_init_stub(PPCContext* ctx, Memory* mem) {
@@ -1423,7 +1469,6 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDInit",                dvd_init_stub },
     { "__OSInitSystemCall",     os_init_system_call_stub },
     { "PSInit",                 ps_init_stub },
-    { "AIInit",                 ai_init_stub },
     { "DSPInit",                dsp_init_stub },
 
     // --- Memory Card (CARD) ---
@@ -1459,6 +1504,7 @@ void register_os_functions() {
     printf("[OS] %d OS functions registered (will bind to addresses via symbol map)\n", count);
 }
 
+RecompiledFunc lookup_ai_func(const char* name);   // src/os/ai_funcs.cpp
 RecompiledFunc lookup_ar_func(const char* name);   // src/os/ar_funcs.cpp
 RecompiledFunc lookup_dvd_func(const char* name);  // src/os/dvd_funcs.cpp
 RecompiledFunc lookup_gx_func(const char* name);   // src/os/gx_funcs.cpp
@@ -1472,6 +1518,7 @@ RecompiledFunc lookup_os_func(const char* name) {
             return entry->func;
         }
     }
+    if (RecompiledFunc f = lookup_ai_func(name)) return f;
     if (RecompiledFunc f = lookup_ar_func(name)) return f;
     if (RecompiledFunc f = lookup_dvd_func(name)) return f;
     if (RecompiledFunc f = lookup_gx_func(name)) return f;

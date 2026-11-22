@@ -496,6 +496,8 @@ bool interrupts_exchange(bool enabled) {
     return prev;
 }
 
+bool interrupts_enabled() { return t_int_enabled; }
+
 void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds) {
     Op op(ctx, mem);
     State& s = S();

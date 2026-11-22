@@ -35,6 +35,9 @@ uint64_t timebase_now();
 // guest thread. Sets the state and returns the previous one.
 bool interrupts_exchange(bool enabled);
 
+// The current guest thread's interrupt state, without changing it.
+bool interrupts_enabled();
+
 // VIWaitForRetrace's wait: the calling guest thread sleeps `microseconds` while the others run.
 void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds);
 
