@@ -164,11 +164,15 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::DIVW:
-            emit("ctx->r[%u] = (int32_t)ctx->r[%u] / (int32_t)ctx->r[%u];", insn.rd, insn.ra, insn.rb);
+            // x86 traps on division by zero and INT_MIN / -1; PowerPC leaves the result undefined.
+            // Gekko returns -1 for a negative dividend and 0 otherwise in those cases.
+            emit("{ int32_t a = (int32_t)ctx->r[%u]; int32_t b = (int32_t)ctx->r[%u]; "
+                 "ctx->r[%u] = (b == 0 || (a == INT32_MIN && b == -1)) ? (a < 0 ? 0xFFFFFFFFu : 0u) : (uint32_t)(a / b); }",
+                 insn.ra, insn.rb, insn.rd);
             break;
 
         case PPCInsnType::DIVWU:
-            emit("ctx->r[%u] = ctx->r[%u] / ctx->r[%u];", insn.rd, insn.ra, insn.rb);
+            emit("ctx->r[%u] = ctx->r[%u] == 0 ? 0u : ctx->r[%u] / ctx->r[%u];", insn.rd, insn.rb, insn.ra, insn.rb);
             break;
 
         // ==== Integer Compare ====

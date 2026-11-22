@@ -403,6 +403,16 @@ int main(int argc, char** argv) {
             fprintf(current_file, "void %s(PPCContext* ctx, Memory* mem) {\n",
                     func.name.c_str());
             if (trace) fprintf(current_file, "    TRACE_ENTER(0x%08Xu);\n", addr);
+            // A function with a real (symbol map) name may have a native replacement in the runtime
+            // (OS/DVD/GX HLE). Direct calls reach this function, not the function table, so the
+            // override is checked here. Names the runtime does not know fall through to the
+            // recompiled body below.
+            if (func.name.rfind("func_", 0) != 0) {
+                fprintf(current_file,
+                        "    { static const gcrecomp::RecompiledFunc hle_ = gcrecomp::lookup_os_func(\"%s\");\n"
+                        "      if (hle_) { hle_(ctx, mem); return; } }\n",
+                        func.name.c_str());
+            }
 
             PPCToCEmitter emitter(current_file);
             emitter.block_addrs = func.block_addrs;

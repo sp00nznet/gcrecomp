@@ -1540,6 +1540,9 @@ void register_os_functions() {
     printf("[OS] %d OS functions registered (will bind to addresses via symbol map)\n", count);
 }
 
+RecompiledFunc lookup_ar_func(const char* name);   // src/os/ar_funcs.cpp
+RecompiledFunc lookup_dvd_func(const char* name);  // src/os/dvd_funcs.cpp
+
 // Lookup OS function by name (called during symbol map loading)
 RecompiledFunc lookup_os_func(const char* name) {
     for (const auto* entry = g_os_func_table; entry->name != nullptr; entry++) {
@@ -1547,7 +1550,8 @@ RecompiledFunc lookup_os_func(const char* name) {
             return entry->func;
         }
     }
-    return nullptr;
+    if (RecompiledFunc f = lookup_ar_func(name)) return f;
+    return lookup_dvd_func(name);
 }
 
 // Set the root directory for game file access (DVD HLE)
