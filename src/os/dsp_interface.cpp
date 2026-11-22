@@ -40,6 +40,8 @@ constexpr uint32_t kInitCodeMail = 0x00544348;
 constexpr uint32_t kBootTagMask = 0xFFFF0000;
 constexpr uint32_t kBootTag = 0x80F30000;
 constexpr uint16_t kBootStart = 0xD001;
+constexpr uint16_t kBootCodeAddress = 0xA001;  // where the microcode is in main memory
+constexpr uint16_t kBootCodeLength = 0xA002;   // its size in bytes
 
 bool env_flag(const char* name) {
     const char* v = std::getenv(name);
@@ -233,14 +235,25 @@ void DspInterface::mail_from_cpu(uint32_t mail, uint8_t* ram, size_t ram_size) {
         if (tag == kBootStart) {
             // The uploaded microcode starts and reports in with an interrupt.
             rom_running_ = false;
-            ax_ = audio::AxUcode();
+            ax_ = audio::AxUcode(boot_ucode_crc(ram, ram_size));
             from_dsp_ = kDspInitMail | kMailValid;
             control_ |= CR_DSPINT;
-            if (trace_) std::fprintf(stderr, "[dsp] ucode starts at %04X: DSP_INIT + interrupt\n", mail & 0xFFFF);
+            if (trace_ || ax_trace_enabled())
+                std::fprintf(stderr, "[dsp] ucode (crc %08X) starts at %04X: DSP_INIT + interrupt\n", ax_.crc(), mail & 0xFFFF);
         }
         return;
     }
     if ((mail & kBootTagMask) == kBootTag) expect_data_for_ = uint16_t(mail);
+}
+
+uint32_t DspInterface::boot_ucode_crc(const uint8_t* ram, size_t ram_size) const {
+    uint32_t address = 0, length = 0;
+    for (const BootField& f : boot_fields_) {
+        if (f.tag == kBootCodeAddress) address = f.data & 0x03FFFFFF;
+        if (f.tag == kBootCodeLength) length = f.data & 0xFFFF;
+    }
+    if (!ram || address >= ram_size || length > ram_size - address) return 0;
+    return audio::ucode_crc(ram + address, length);
 }
 
 void DspInterface::axucode_mail(uint32_t mail, uint8_t* ram, size_t ram_size) {

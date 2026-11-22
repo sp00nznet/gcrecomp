@@ -42,6 +42,11 @@ Switches and tools for finding out why a frame looks wrong. Nothing here needs a
   after touching `tools/recompiler/ppc_to_c.cpp` or `ppc_disasm.cpp`, and whenever a game does something subtly
   wrong (a silent audio channel, a slightly wrong value) with no visible crash: a recompiler instruction bug is
   the usual cause.
+* `tools/guest-gdb.sh --bin BINARY --break func_8017AD3C --args "r3 r4" --mem r4:8 [--ignore N] -- PROGRAM-ARGS`: gdb
+  breakpoints on guest functions (including the ones called directly with `bl`, which `GCRECOMP_TRACE_ARGS` cannot
+  see): prints guest registers, memory words at an address or at `rN[+off]`, and the guest call chain, then continues.
+  To compare a recompiled function with the real CPU, dump its inputs and outputs from gdb
+  (`dump binary memory`) and replay them with `tools/ppc-diff/replay.py` (Unicorn, from the DOL).
 * `tools/wav-channels.py A.wav [B.wav ...]`: per-channel RMS, L-R and the share of identical samples per time bin
   of a stereo WAV (`GCRECOMP_DUMP_AUDIO` or Dolphin's dumps), with a verdict mono / left only / right only / stereo.
 
@@ -75,11 +80,23 @@ Environment switches:
 | `GCRECOMP_DUMP_AUDIO=file.wav` | Everything played, as a 16-bit stereo WAV (valid after every block). |
 | `GCRECOMP_AUDIO_TRACE=1` | Once a second: DMA blocks started, all-zero blocks, underruns, sink stalls, longest gap between polls, block size, rate, sink queue. |
 | `GCRECOMP_AX_TRACE=1` | The first running AX voices (parameter block, format, addresses, ratio) and, once a second, the command histogram, voice slices and the RMS at stages of the mix (upload L/R/S, surround buffer in, output L/R/S): shows at which stage a channel dies. |
+| `GCRECOMP_SOUND_MODE=mono` | The console sound setting `OSGetSoundMode` reports (default stereo, as a console and Dolphin; the SDK's own code would read the never-loaded SRAM as mono). Games choose a stereo or mono mix / movie audio track by it. |
 | `DSP_TRACE=1` | DSP mails, control writes, every 500th AX list. |
 
 A sink that holds a full lead and does not drain for 250 ms (device suspended or lost) is detected: the DMA then keeps
 its real-time pace on the host clock and discards the audio, so the game does not freeze (`[AI] the audio device
 stopped consuming`).
+
+The AX model follows the version of the microcode the game uploaded, identified by Dolphin's HashEctor over its code
+(`GCRECOMP_AX_TRACE=1` prints `[dsp] ucode (crc XXXXXXXX) starts`). `4E8A8B21`, the first GameCube AX (Tales of
+Symphonia), reads a voice's mixer control word as "aux A / aux B / surround / ramp" with main L and R always mixed, has no
+low-pass filter section in its parameter blocks, and later versions use one bit per bus. Reading a first-version game
+with the later meaning drops the right channel of every voice whose word has no "R" bit (the title music was left
+only). If a channel is silent at the `uploadR` stage of the `GCRECOMP_AX_TRACE` RMS line, look at the voices' mixer
+control words first.
+
+The console's sound setting (`OSGetSoundMode`) selects stereo or mono mixes and movie tracks in some games; it is
+stereo unless `GCRECOMP_SOUND_MODE=mono`.
 
 Tools:
 

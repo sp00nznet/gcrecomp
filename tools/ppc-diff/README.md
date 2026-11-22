@@ -32,6 +32,11 @@ matches. Runner arguments (after `--`): `--only NAME,..`, `--ignore NAME,..`, `-
   `ppc_diff_run` target and the `ppc_diff` ctest. Without the variable nothing is built, so the normal build and CI do
   not need Unicorn.
 
+* `replay.py`: runs one whole guest function of a DOL on Unicorn from a captured state (registers, memory files) and
+  compares the memory it writes with a capture of the recompiled build's call, see its `--help`. The capture comes
+  from `tools/guest-gdb.sh` / gdb's `dump binary memory`. It showed that Tales of Symphonia's HVQM4 ADPCM decoder was
+  recompiled correctly (the mono sound came from the game's inputs, not from the emitted code).
+
 ## What it does not cover
 
 * Branches (`b`, `bc`, `bclr`, `bcctr`): the emitter needs a function context for them; the `bc` condition shapes

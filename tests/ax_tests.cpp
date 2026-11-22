@@ -421,6 +421,72 @@ void test_stats_count_commands_and_voices() {
 
 }  // namespace
 
+// Renders a constant PCM16 voice whose mixer control word is `mixer_control`, with a microcode of the given crc.
+void render_with_mixer_control(uint32_t crc, uint16_t mixer_control, int& right, int& left) {
+    std::vector<uint8_t> ram(0x8000), aram(0x1000);
+    for (int i = 0; i < 300; ++i) {
+        aram[2 * i] = 0x20;  // 0x2000 constant
+        aram[2 * i + 1] = 0x00;
+    }
+    write_pb(ram, 0x000A, 2, 0, 0x7FF);
+    put16(ram, kPb + 2 * 6, mixer_control);
+    const uint32_t size = write_cmdlist(ram);
+    AxMemory mem{ram.data(), ram.size(), aram.data(), aram.size()};
+    AxUcode ax(crc);
+    ax.handle_mail(AxUcode::kMailCmdList | size, mem);
+    ax.handle_mail(kCmd, mem);
+    out_frame(ram, 100, right, left);
+}
+
+void test_mixer_control_bits_of_the_later_microcodes_select_the_buses() {
+    int right, left;
+    render_with_mixer_control(0, 0x0001, right, left);  // main L only
+    CHECK(left > 1000 && right == 0);
+    render_with_mixer_control(0, 0x0002, right, left);  // main R only
+    CHECK(right > 1000 && left == 0);
+    render_with_mixer_control(0, 0x0000, right, left);  // nothing
+    CHECK(left == 0 && right == 0);
+}
+
+// Tales of Symphonia's title music: voices with mixer control 0 / 1 / 9 and no "R" bit anywhere, which in the first
+// GameCube microcode means "main L and R (always), plus aux A" and played as left channel only before.
+void test_mixer_control_of_the_first_microcode_always_mixes_main_left_and_right() {
+    for (uint16_t control : {0x0000, 0x0001, 0x0009}) {
+        int right, left;
+        render_with_mixer_control(AxUcode::kCrcOldGc, control, right, left);
+        CHECK(left > 1000);
+        CHECK(right == left);
+    }
+}
+
+// Its parameter block has no low-pass filter section: the words after it follow the ones before it.
+void test_first_microcode_parameter_block_has_no_low_pass_filter_section() {
+    std::vector<uint8_t> ram(0x8000);
+    const std::vector<uint8_t> aram(0x1000);
+    write_pb(ram, 0x000A, 2, 0, 10);
+    // shift the words from 97 on four words down (towards 93), as that microcode's layout does
+    for (size_t i = 97; i < kPbWords; ++i) put16(ram, kPb + 2 * uint32_t(i - 4), get16(ram, kPb + 2 * uint32_t(i)));
+    put16(ram, kPb + 2 * (97 - 4), 0x1234);  // the loop counter
+    const uint32_t size = write_cmdlist(ram);
+    AxMemory mem{ram.data(), ram.size(), aram.data(), aram.size()};
+    AxUcode ax(AxUcode::kCrcOldGc);
+    ax.handle_mail(AxUcode::kMailCmdList | size, mem);
+    ax.handle_mail(kCmd, mem);
+    CHECK(get16(ram, kPb + 2 * (97 - 4)) == 0x1234);  // written back where it was read from
+    CHECK(get16(ram, kPb + 14) == 0);                 // the one-shot voice ended: its running flag is cleared
+}
+
+void test_ucode_crc_is_dolphins_hash() {
+    const uint8_t code[] = {1, 2, 3};
+    uint32_t crc = 0;
+    for (uint8_t b : code) {
+        crc ^= b;
+        crc = (crc << 3) | (crc >> 29);
+    }
+    CHECK(ucode_crc(code, sizeof code) == crc);
+    CHECK(ucode_crc(code, 0) == 0);
+}
+
 int main() {
     test_pcm16_voice_reaches_the_output_right_word_first();
     test_adpcm_frame_decodes_nibbles_scaled_by_the_header();
@@ -438,6 +504,10 @@ int main() {
     test_aux_return_buffers_reach_the_output_with_the_surround_matrix();
     test_output_clamps_to_16_bits();
     test_stats_count_commands_and_voices();
+    test_mixer_control_bits_of_the_later_microcodes_select_the_buses();
+    test_mixer_control_of_the_first_microcode_always_mixes_main_left_and_right();
+    test_first_microcode_parameter_block_has_no_low_pass_filter_section();
+    test_ucode_crc_is_dolphins_hash();
     if (g_failures) {
         std::printf("%d failure(s)\n", g_failures);
         return 1;

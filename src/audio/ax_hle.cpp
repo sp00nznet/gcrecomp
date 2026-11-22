@@ -286,11 +286,32 @@ void mix_add(int32_t* out, const int16_t* input, size_t count, PbWords pb, size_
     pb[vol_at] = volume;
 }
 
-uint32_t convert_mixer_control(uint32_t m) {
+// Mixer control word of the parameter block -> the one-bit-per-bus form (AXMixControl).
+uint32_t convert_mixer_control(uint32_t m, uint32_t crc) {
     uint32_t r = 0;
     auto set = [&](bool cond, uint32_t bits) {
         if (cond) r |= bits;
     };
+    if (crc == AxUcode::kCrcOldGc) {
+        if (m & 0x0010) {
+            // Dolby Pro Logic II mixing
+            r |= kMixMainL | kMixMainR;
+            set((m & 0x0006) == 0, kMixAuxBL | kMixAuxBR);
+            set((m & 0x0007) == 1, kMixAuxAL | kMixAuxAR | kMixAuxAS);
+        } else {
+            r |= kMixMainL | kMixMainR;
+            set(m & 0x0001, kMixAuxAL | kMixAuxAR);
+            set(m & 0x0002, kMixAuxBL | kMixAuxBR);
+            if (m & 0x0004) {
+                r |= kMixMainS;
+                set(r & kMixAuxAL, kMixAuxAS);
+                set(r & kMixAuxBL, kMixAuxBS);
+            }
+        }
+        set(m & 0x0008, kMixMainLRamp | kMixMainRRamp | kMixMainSRamp | kMixAuxALRamp | kMixAuxARRamp | kMixAuxASRamp |
+                            kMixAuxBLRamp | kMixAuxBRRamp | kMixAuxBSRamp);
+        return r;
+    }
     set(m & 0x0001, kMixMainL);
     set(m & 0x0002, kMixMainR);
     set(m & 0x0004, kMixMainS);
@@ -310,7 +331,16 @@ uint32_t convert_mixer_control(uint32_t m) {
 
 }  // namespace
 
-AxUcode::AxUcode() = default;
+uint32_t ucode_crc(const uint8_t* code, size_t length) {
+    uint32_t crc = 0;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= code[i];
+        crc = (crc << 3) | (crc >> 29);
+    }
+    return crc;
+}
+
+AxUcode::AxUcode(uint32_t crc) : crc_(crc) {}
 
 std::optional<uint32_t> AxUcode::handle_mail(uint32_t mail, AxMemory& mem) {
     if (upload_mails_ > 0) {
@@ -458,10 +488,31 @@ void AxUcode::download_and_mix(uint32_t addr, uint16_t vol_main, uint16_t vol_au
     }
 }
 
+// The parameter block as the CPU lays it out in memory. The first GameCube microcode has no low-pass filter section
+// (words kLpfFirst..kLpfEnd): the words after it follow the ones before it directly.
+void AxUcode::read_pb(Pb pb, uint32_t addr, const AxMemory& mem) const {
+    if (crc_ != kCrcOldGc) {
+        for (size_t i = 0; i < kPbWords; ++i) pb[i] = r16(mem, addr + 2 * uint32_t(i));
+        return;
+    }
+    for (size_t i = 0; i < kLpfFirst; ++i) pb[i] = r16(mem, addr + 2 * uint32_t(i));
+    for (size_t i = kLpfFirst; i < kLpfEnd; ++i) pb[i] = 0;
+    for (size_t i = kLpfEnd; i < kPbWords; ++i) pb[i] = r16(mem, addr + 2 * uint32_t(i - (kLpfEnd - kLpfFirst)));
+}
+
+void AxUcode::write_pb(const Pb pb, uint32_t addr, AxMemory& mem) const {
+    if (crc_ != kCrcOldGc) {
+        for (size_t i = 0; i < kPbWords; ++i) w16(mem, addr + 2 * uint32_t(i), pb[i]);
+        return;
+    }
+    for (size_t i = 0; i < kLpfFirst; ++i) w16(mem, addr + 2 * uint32_t(i), pb[i]);
+    for (size_t i = kLpfEnd; i < kPbWords; ++i) w16(mem, addr + 2 * uint32_t(i - (kLpfEnd - kLpfFirst)), pb[i]);
+}
+
 void AxUcode::process_pb_list(uint32_t pb_addr, AxMemory& mem) {
     for (int guard = 0; pb_addr != 0 && guard < 256; ++guard) {
         PbWords pb;
-        for (size_t i = 0; i < kPbWords; ++i) pb[i] = r16(mem, pb_addr + 2 * uint32_t(i));
+        read_pb(pb, pb_addr, mem);
         cur_pb_addr_ = pb_addr;
         // per-millisecond parameter updates
         uint16_t updates[32][2];
@@ -482,7 +533,7 @@ void AxUcode::process_pb_list(uint32_t pb_addr, AxMemory& mem) {
             }
             process_voice(pb, ms, mem);
         }
-        for (size_t i = 0; i < kPbWords; ++i) w16(mem, pb_addr + 2 * uint32_t(i), pb[i]);
+        write_pb(pb, pb_addr, mem);
         pb_addr = hilo(pb[0], pb[1]);
     }
 }
@@ -543,7 +594,7 @@ void AxUcode::process_voice(Pb pb, size_t ms, const AxMemory& mem) {
         pb[94] = uint16_t(yn1);
     }
 
-    const uint32_t m = convert_mixer_control(pb[6]);
+    const uint32_t m = convert_mixer_control(pb[6], crc_);
     struct Route {
         size_t buf, vol, dpop;
         uint32_t bit, ramp;

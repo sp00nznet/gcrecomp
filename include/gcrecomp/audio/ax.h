@@ -27,8 +27,18 @@ struct AxMemory {
     size_t aram_size = 0;
 };
 
+/// The identifier of a microcode image: Dolphin's HashEctor over the code bytes (the DSP HLE tells the AX versions apart
+/// by it, see AxUcode::kCrcOldGc).
+uint32_t ucode_crc(const uint8_t* code, size_t length);
+
 class AxUcode {
 public:
+    /// The first GameCube AX microcode. It differs from the later ones in the meaning of the voice parameter block's
+    /// mixer control word (bit 0 = send to aux A, bit 1 = aux B, bit 2 = surround, bit 3 = ramp, bit 4 = Dolby Pro Logic II
+    /// mixing; the main L/R buses are always mixed) and in its parameter block, which has no low-pass filter section in
+    /// main memory. Later ones have one bit per bus (bit 0 = main L, bit 1 = main R, ...).
+    static constexpr uint32_t kCrcOldGc = 0x4E8A8B21;
+
     static constexpr uint32_t kMailCmdList = 0xBABE0000;
     static constexpr uint32_t kDspResume = 0xDCD10001;
     static constexpr uint32_t kDspYield = 0xDCD10002;
@@ -36,7 +46,9 @@ public:
     /// Samples per frame and bus: 5 ms at 32 kHz.
     static constexpr size_t kFrame = 5 * 32;
 
-    AxUcode();
+    /// `crc` is ucode_crc() of the microcode the game uploaded; 0 (unknown) selects the later, one-bit-per-bus mixer control.
+    explicit AxUcode(uint32_t crc = 0);
+    uint32_t crc() const { return crc_; }
 
     /// Handles one mail from the CPU; returns the mail the microcode answers with, if any.
     std::optional<uint32_t> handle_mail(uint32_t mail, AxMemory& mem);
@@ -73,12 +85,17 @@ private:
     enum class MailState { WaitingForCmdListSize, WaitingForCmdListAddress, WaitingForNextTask };
     static constexpr size_t kPbWords = 122;
     using Pb = uint16_t[kPbWords];
+    /// The low-pass filter section of the parameter block: words [kLpfFirst, kLpfEnd).
+    static constexpr size_t kLpfFirst = 93;
+    static constexpr size_t kLpfEnd = 97;
 
     void tap(int which, const int32_t* samples);
     void copy_cmdlist(uint32_t addr, size_t size, const AxMemory& mem);
     void run_cmdlist(AxMemory& mem);
     void setup(uint32_t init_addr, const AxMemory& mem);
     void download_and_mix(uint32_t addr, uint16_t vol_main, uint16_t vol_auxa, uint16_t vol_auxb, const AxMemory& mem);
+    void read_pb(Pb pb, uint32_t addr, const AxMemory& mem) const;
+    void write_pb(const Pb pb, uint32_t addr, AxMemory& mem) const;
     void process_pb_list(uint32_t pb_addr, AxMemory& mem);
     void process_voice(Pb pb, size_t ms, const AxMemory& mem);
     void mix_aux(size_t aux_id, uint32_t write_addr, uint32_t read_addr, AxMemory& mem);
@@ -98,6 +115,7 @@ private:
     uint16_t compressor_pos_ = 0;
     /// Mails left to swallow while the CPU uploads a new microcode.
     uint32_t upload_mails_ = 0;
+    uint32_t crc_ = 0;
     uint64_t frames_ = 0;
     Stats stats_;
     VoiceObserver voice_observer_ = nullptr;

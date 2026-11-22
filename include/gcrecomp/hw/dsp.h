@@ -106,6 +106,8 @@ private:
     bool init_code_loaded_ = false;  // the SDK's init code was DMA'd in since the last reset
     uint16_t expect_data_for_ = 0;  // command tag whose data mail comes next (0: none)
     std::vector<BootField> boot_fields_;
+    // ucode_crc() of the microcode the boot task fields point to (0 if they do not name a range of memory).
+    uint32_t boot_ucode_crc(const uint8_t* ram, size_t ram_size) const;
     audio::AxUcode ax_;  // the game's microcode, once the boot task started it
     bool trace_ = false;
 };

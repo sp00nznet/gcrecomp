@@ -1029,6 +1029,34 @@ void hle_dump(size_t top) {
 }
 
 // =============================================================================
+// Sound mode (OSGetSoundMode / OSSetSoundMode)
+//
+// The SDK keeps the console's sound setting in the SRAM flags (bit 2 set = stereo), which OSInit loads
+// from the real SRAM through the EXI. OSInit does not run here, so that SRAM is all zero and the SDK
+// reported mono: games that choose between a stereo and a mono mix or movie audio track by this setting
+// (Tales of Symphonia: the intro movie's second audio track is a mono downmix, the software mixer folds
+// the music) played everything as mono. A console (and Dolphin) is set to stereo by default.
+// GCRECOMP_SOUND_MODE=mono selects the mono setting.
+//
+// Reference: libogc ogc/system.h (SYS_GetSoundMode / SYS_SetSoundMode: 0 mono, 1 stereo).
+// =============================================================================
+
+// The rest of the SRAM-derived settings, pinned to a standard console (English, no progressive scan, no
+// EuRGB60, wireless id 0, counter bias 0): the SDK's own getters would return what the zeroed block holds, which
+// is the same today, but nothing then guards it. tests/os_sound_mode_test.cpp pins the values.
+static uint32_t g_sound_mode = [] {
+    const char* v = std::getenv("GCRECOMP_SOUND_MODE");
+    return uint32_t(v && std::strcmp(v, "mono") == 0 ? 0 : 1);
+}();
+static uint32_t g_language = 0;  // OS_LANG_ENGLISH
+
+static void os_get_sound_mode(PPCContext* ctx, Memory*) { ctx->r[3] = g_sound_mode; }
+static void os_set_sound_mode(PPCContext* ctx, Memory*) { g_sound_mode = ctx->r[3] == 0 ? 0 : 1; }
+static void os_get_language(PPCContext* ctx, Memory*) { ctx->r[3] = g_language; }
+static void os_set_language(PPCContext* ctx, Memory*) { g_language = ctx->r[3] & 0xFF; }
+static void os_return_zero(PPCContext* ctx, Memory*) { ctx->r[3] = 0; }  // progressive, EuRGB60, wireless id, bias
+
+// =============================================================================
 // Init Stubs
 //
 // These are called during game boot but their real work is either handled
@@ -1146,6 +1174,16 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDClose",               dvd_close },
     { "DVDReadPrio",            dvd_read_prio },
     { "DVDReadAsync",           dvd_read_async },
+
+    // --- Sound setting ---
+    { "OSGetSoundMode",         os_get_sound_mode },
+    { "OSSetSoundMode",         os_set_sound_mode },
+    { "OSGetLanguage",          os_get_language },
+    { "OSSetLanguage",          os_set_language },
+    { "OSGetProgressiveMode",   os_return_zero },
+    { "OSGetEuRgb60Mode",       os_return_zero },
+    { "OSGetWirelessID",        os_return_zero },
+    { "OSGetCounterBias",       os_return_zero },
 
     // --- Init Stubs ---
     { "OSInit",                 os_init_stub },
