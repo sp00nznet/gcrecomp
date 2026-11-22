@@ -17,6 +17,15 @@ Switches and tools for finding out why a frame looks wrong. Nothing here needs a
 | `GP_SHOT_EVERY=n` | Screenshot (PPM, window size) every `n` presented frames, into the screenshot directory of the host program. |
 | `GP_XHIST=1` | Histogram of XF register writes at exit. |
 
+## Environment variables (guest memory and calls)
+
+| Variable | Effect |
+| --- | --- |
+| `GCRECOMP_WATCH=0xADDR:LEN[,..]` | Every store overlapping a range prints `[watch] #N writeW addr = value bt: ...` with the host call chain; `tools/guest-watch.py --bin BINARY LOG [--summary]` names the guest functions. `GCRECOMP_WATCH_MAX=N` caps the lines (default 64). |
+| `GCRECOMP_TRACE_CALLS=LR[,LR..]` | Prints the target and r3-r6 of function-table calls made with those link-register values (`GCRECOMP_TRACE_CALLS_MAX`, default 20). |
+| `GCRECOMP_TRACE_ARGS=ADDR:SPEC[,SPEC..][;ADDR:..]` | When the function at ADDR is entered through the function table (callbacks, pointer calls), prints guest registers (`r3`) or memory words (`r13[-30980]`). `GCRECOMP_TRACE_ARGS_EVERY=N`, `GCRECOMP_TRACE_ARGS_MAX=N` (default 50). |
+| `GCRECOMP_DEBUG_AFTER=S` | The three facilities above stay quiet for the first S seconds of wall-clock time. |
+
 ## Tools
 
 * `tools/frame_compare.py OURS REFERENCE [--out sheet.png]`: compares one of our screenshots (PPM) with a

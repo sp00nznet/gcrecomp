@@ -157,6 +157,63 @@ static void trace_call(uint32_t gc_addr, const PPCContext* ctx) {
                  ctx->r[4], ctx->r[5], ctx->r[6]);
 }
 
+// GCRECOMP_TRACE_ARGS=ADDR:SPEC[,SPEC...][;ADDR:SPEC...]: when a function is entered through the function table
+// (callbacks, vtable and pointer calls, the AI DMA callback ...), print guest values. ADDR is the hex entry address;
+// SPEC is rN (a register) or rN[off] (the 32-bit word at rN + off, decimal or 0x hex, may be negative: an SDA
+// global is r13[-30980]). GCRECOMP_TRACE_ARGS_EVERY=N prints every Nth call (default 1), GCRECOMP_TRACE_ARGS_MAX=N
+// caps the lines (default 50), GCRECOMP_DEBUG_AFTER=S skips the first S seconds.
+static void trace_args(uint32_t gc_addr, const PPCContext* ctx, const Memory* mem) {
+    struct Spec { unsigned reg; bool deref; int32_t off; };
+    struct Entry { uint32_t addr; std::vector<Spec> specs; };
+    static const std::vector<Entry> entries = [] {
+        std::vector<Entry> v;
+        const char* e = std::getenv("GCRECOMP_TRACE_ARGS");
+        while (e && *e) {
+            char* end = nullptr;
+            Entry en;
+            en.addr = static_cast<uint32_t>(std::strtoul(e, &end, 16));
+            if (end == e || *end != ':') break;
+            e = end + 1;
+            while (*e == 'r') {
+                Spec s{static_cast<unsigned>(std::strtoul(e + 1, &end, 10)), false, 0};
+                e = end;
+                if (*e == '[') {
+                    s.deref = true;
+                    s.off = static_cast<int32_t>(std::strtol(e + 1, &end, 0));
+                    e = *end == ']' ? end + 1 : end;
+                }
+                if (s.reg < 32) en.specs.push_back(s);
+                if (*e == ',') ++e;
+            }
+            v.push_back(en);
+            if (*e == ';') ++e; else break;
+        }
+        return v;
+    }();
+    if (entries.empty()) return;
+    for (const Entry& en : entries) {
+        if (en.addr != gc_addr || !debug_armed()) continue;
+        static const unsigned long every = [] {
+            const char* v = std::getenv("GCRECOMP_TRACE_ARGS_EVERY");
+            return v && *v ? std::max(1ul, std::strtoul(v, nullptr, 0)) : 1ul;
+        }();
+        static const unsigned long limit = [] {
+            const char* v = std::getenv("GCRECOMP_TRACE_ARGS_MAX");
+            return v && *v ? std::strtoul(v, nullptr, 0) : 50ul;
+        }();
+        static unsigned long calls = 0, printed = 0;
+        if (calls++ % every != 0 || printed >= limit) return;
+        ++printed;
+        std::fprintf(stderr, "[args] 0x%08X LR=0x%08X", gc_addr, ctx->lr);
+        for (const Spec& s : en.specs) {
+            if (s.deref) std::fprintf(stderr, " r%u[%d]=0x%08X", s.reg, s.off, mem->read32(ctx->r[s.reg] + static_cast<uint32_t>(s.off)));
+            else std::fprintf(stderr, " r%u=0x%08X", s.reg, ctx->r[s.reg]);
+        }
+        std::fprintf(stderr, "\n");
+        return;
+    }
+}
+
 void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
     if (gc_addr == 0) return; // Null function pointer — skip silently
 
@@ -164,6 +221,7 @@ void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
     g_dispatch_lr.store(ctx->lr, std::memory_order_relaxed);
     g_dispatch_seq.fetch_add(1, std::memory_order_relaxed);
     trace_call(gc_addr, ctx);
+    trace_args(gc_addr, ctx, mem);
 
     // Basic sanity check: must be in GameCube RAM range and 4-byte aligned.
     // Valid code addresses are 0x80000000 - 0x82FFFFFF (up to 48 MB for Triforce).
