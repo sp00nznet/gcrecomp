@@ -50,6 +50,8 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/rarc.cpp
         src/os/ai_funcs.cpp
         src/os/ar_funcs.cpp
+        src/os/card_image.cpp
+        src/os/card_funcs.cpp
         src/os/dvd_funcs.cpp
         src/os/gx_funcs.cpp
         src/os/pad_funcs.cpp
@@ -233,10 +235,17 @@ endif()
 # ===========================================================================
 # Unit tests (no display, no disc): cmake -DGCRECOMP_BUILD_TESTS=ON, then ctest
 # ===========================================================================
-option(GCRECOMP_BUILD_TESTS "Build the unit tests" OFF)
 if(GCRECOMP_BUILD_TESTS)
     enable_testing()
     add_executable(test_gp_lighting tests/test_gp_lighting.cpp src/gp/lighting.cpp)
     target_include_directories(test_gp_lighting PRIVATE src/gp)
     add_test(NAME gp_lighting COMMAND test_gp_lighting)
+    add_executable(card_image_test tests/card_image_test.cpp src/os/card_image.cpp)
+    target_include_directories(card_image_test PRIVATE src/os)
+    add_test(NAME card_image COMMAND card_image_test)
+    if(GCRECOMP_BUILD_RUNTIME)
+        add_executable(card_hle_test tests/card_hle_test.cpp)
+        target_link_libraries(card_hle_test PRIVATE gcrecomp_runtime)
+        add_test(NAME card_hle COMMAND card_hle_test)
+    endif()
 endif()
