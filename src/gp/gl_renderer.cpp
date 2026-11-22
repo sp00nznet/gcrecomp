@@ -5,9 +5,6 @@
 // One fragment shader implements the TEV (texture environment) pipeline with the stage
 // configuration passed as uniforms. The EFB is a 640x528 framebuffer object; a copy to the
 // external frame buffer blits it to the window.
-#define GL_GLEXT_PROTOTYPES 1
-#include <GL/gl.h>
-#include <GL/glext.h>
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -21,6 +18,7 @@
 #include "gcrecomp/gx/gx.h"
 #include "gcrecomp/runtime.h"
 #include "efb_copy.h"
+#include "gl_loader.h"
 #include "gp_decode.h"
 #include "gp_internal.h"
 #include "input.h"
@@ -527,6 +525,10 @@ bool init(int window_w, int window_h, const char* screenshot_dir, int max_screen
     g_context = SDL_GL_CreateContext(g_window);
     if (!g_context) {
         std::fprintf(stderr, "[GL] cannot create an OpenGL 3.3 context: %s\n", SDL_GetError());
+        return false;
+    }
+    if (!gl_load_functions()) {
+        std::fprintf(stderr, "[GL] the driver does not expose the required OpenGL 3.3 entry points\n");
         return false;
     }
     SDL_GL_SetSwapInterval(0);

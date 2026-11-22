@@ -8,9 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#define GL_GLEXT_PROTOTYPES 1
-#include <GL/gl.h>
-
+#include "gl_loader.h"
 #include "gp_internal.h"
 
 using namespace gcrecomp::gp;
