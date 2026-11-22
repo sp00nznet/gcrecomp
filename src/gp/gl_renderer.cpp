@@ -20,6 +20,7 @@
 
 #include "gcrecomp/gx/gx.h"
 #include "gcrecomp/runtime.h"
+#include "efb_copy.h"
 #include "gp_internal.h"
 #include "input.h"
 
@@ -631,6 +632,41 @@ void draw(const DrawCall& call, const State& s) {
     glDrawArrays(mode, 0, GLsizei(count));
 }
 
+// Copy a region of the EFB to main memory in the console's tiled layout (BP 0x52 with the XFB bit
+// clear). Reads back from the GPU. The texture cache keys on a hash of the guest bytes, so entries
+// overlapping the destination are re-decoded on their next use without explicit invalidation.
+static void copy_efb_to_memory(const State& s, uint32_t copy_cmd) {
+    EfbCopyParams p = make_efb_copy_params(copy_cmd, s.bp[0x49], s.bp[0x4A], s.bp[0x4D], s.bp[0x4E],
+                                           (s.bp[0x43] & 7) == 3);
+    p.w = std::min(p.w, kEfbWidth - p.x);
+    p.h = std::min(p.h, kEfbHeight - p.y);
+    const uint32_t addr = (s.bp[0x4B] & 0xFFFFFF) << 5;
+    if (p.w <= 0 || p.h <= 0) return;
+    if (uint64_t(addr) + efb_copy_extent(p) > g_mem.ram_size) {
+        std::fprintf(stderr, "[GL] EFB copy to 0x%06X (+%zu) is outside RAM, ignored\n", addr, efb_copy_extent(p));
+        return;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const int gl_y = kEfbHeight - (p.y + p.h);
+    std::vector<uint8_t> rgba(size_t(p.w) * p.h * 4);
+    std::vector<uint32_t> depth;
+    if (p.depth) {
+        depth.resize(size_t(p.w) * p.h);
+        glReadPixels(p.x, gl_y, p.w, p.h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, depth.data());
+        for (uint32_t& d : depth) d >>= 8;
+    } else {
+        glReadPixels(p.x, gl_y, p.w, p.h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    }
+    // GL rows run bottom to top.
+    auto flip = [&](auto& v, size_t row_elems) {
+        for (int a = 0, b = p.h - 1; a < b; ++a, --b)
+            std::swap_ranges(v.begin() + a * row_elems, v.begin() + (a + 1) * row_elems, v.begin() + b * row_elems);
+    };
+    if (p.depth) flip(depth, size_t(p.w)); else flip(rgba, size_t(p.w) * 4);
+    encode_efb_copy(p, rgba.data(), p.depth ? depth.data() : nullptr, g_mem.translate(addr));
+}
+
 void copy_efb(const CopyRequest& r, const State& s) {
     static int traced = 0;
     if (traced < 6 && std::getenv("GP_TRACE")) {
@@ -653,6 +689,7 @@ void copy_efb(const CopyRequest& r, const State& s) {
         SDL_GL_SwapWindow(g_window);
         SDL_GetWindowSizeInPixels(g_window, &g_window_w, &g_window_h);
     }
+    if (!r.to_xfb) copy_efb_to_memory(s, s.bp[0x52]);
     if (r.clear) {
         const uint32_t ar = s.bp[0x4F], gb = s.bp[0x50], z = s.bp[0x51];
         glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
