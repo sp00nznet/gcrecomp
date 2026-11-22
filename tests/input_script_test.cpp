@@ -223,6 +223,25 @@ static void test_log() {
     CHECK(h.script.take_log().empty());
 }
 
+static void test_stick() {
+    Host h("stick up+left hold=3; wait 5; cstick 0 -50 hold=2; stick 10 -20 hold=1");
+    h.tick();
+    CHECK(h.script.sticks().x == -100 && h.script.sticks().y == 100 && h.script.sticks().sub_y == 0);
+    h.tick();
+    h.tick();
+    h.tick();
+    CHECK(h.script.sticks().x == 0 && h.script.sticks().y == 0);  // released after 3 frames
+    h.tick();
+    h.tick();  // frame 6: the wait is over, the C-stick and the stick start
+    CHECK(h.script.sticks().sub_y == -50 && h.script.sticks().x == 10 && h.script.sticks().y == -20);
+    h.tick();
+    CHECK(h.script.sticks().sub_y == -50 && h.script.sticks().x == 0);
+    Script s;
+    std::string e;
+    CHECK(!s.parse("stick", e) && !s.parse("stick 1", e) && !s.parse("stick 200 0", e) && !s.parse("stick sideways", e));
+    CHECK(s.parse("stick neutral hold=4", e));
+}
+
 static void test_signature() {
     // Left half black, right half white.
     const int w = 64, h = 36;
@@ -255,6 +274,7 @@ int main() {
     test_shot();
     test_trace_frame();
     test_log();
+    test_stick();
     test_signature();
     if (g_failures) std::fprintf(stderr, "%d check(s) failed\n", g_failures);
     else std::puts("input script tests passed");

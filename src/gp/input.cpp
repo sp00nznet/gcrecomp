@@ -447,6 +447,10 @@ void update() {
 
     ++g_frame;
     next[0].buttons |= run_script();
+    if (const Script::Sticks& st = g_script.sticks(); st.x || st.y || st.sub_x || st.sub_y) {
+        if (st.x || st.y) next[0].stick_x = st.x, next[0].stick_y = st.y;
+        if (st.sub_x || st.sub_y) next[0].substick_x = st.sub_x, next[0].substick_y = st.sub_y;
+    }
 
     for (int p = 0; p < 4; ++p) {
         const bool owned = g_ports.owner(p) != 0;

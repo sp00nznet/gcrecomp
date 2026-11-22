@@ -1,0 +1,6 @@
+# Tales of Symphonia: the field menu (X), exploratory: in the classroom the menu does not open yet (docs/GAMEPLAY_FINDINGS.md); use it once Lloyd is free to roam.
+press X; wait 90; shot menu0
+press D; wait 40; press D; wait 40; press D; wait 40; shot menu3
+press D; wait 40; press D; wait 40; press D; wait 40; shot menu6
+press D; wait 40; shot menu7
+press A; wait 90; shot menu7-open

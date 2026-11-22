@@ -82,6 +82,31 @@ uint16_t button_mask(const std::string& name) {
     return 0;
 }
 
+// A stick deflection: "up", "down+left", ... (full direction = 100 of 127, like a firm push) or "X Y" numbers.
+bool parse_direction(const std::string& s, int& x, int& y) {
+    x = y = 0;
+    for (size_t pos = 0; pos <= s.size();) {
+        size_t plus = s.find('+', pos);
+        if (plus == std::string::npos) plus = s.size();
+        const std::string n = lower(s.substr(pos, plus - pos));
+        if (n == "up") y = 100;
+        else if (n == "down") y = -100;
+        else if (n == "left") x = -100;
+        else if (n == "right") x = 100;
+        else if (n != "neutral") return false;
+        pos = plus + 1;
+    }
+    return true;
+}
+
+bool parse_int(const std::string& s, int& out) {
+    char* end = nullptr;
+    const long v = std::strtol(s.c_str(), &end, 10);
+    if (!end || *end || s.empty() || v < -128 || v > 127) return false;
+    out = int(v);
+    return true;
+}
+
 bool parse_number(const std::string& s, double& out) {
     char* end = nullptr;
     out = std::strtod(s.c_str(), &end);
@@ -147,6 +172,17 @@ bool parse_command(const std::vector<std::string>& w, const std::string& src, st
             c.mask |= m;
             pos = plus + 1;
         }
+        if (!have_hold) c.count = 5;
+        if (c.count < 1) return fail("hold must be at least 1 frame");
+    } else if (verb == "stick" || verb == "cstick") {
+        c.kind = CmdKind::Stick;
+        c.sub = verb == "cstick";
+        int x = 0, y = 0;
+        const bool two = args.size() == 2 && parse_int(args[0], x) && parse_int(args[1], y);
+        if (!two && !(args.size() == 1 && parse_direction(args[0], x, y)))
+            return fail(verb + " takes X Y (-128..127, y up) or directions joined by '+' (" + verb + " up+left hold=60, " + verb + " 0 100)");
+        c.sx = int8_t(x);
+        c.sy = int8_t(y);
         if (!have_hold) c.count = 5;
         if (c.count < 1) return fail("hold must be at least 1 frame");
     } else if (verb == "press-until-file") {
@@ -334,6 +370,7 @@ uint16_t Script::step(const Observation& o) {
                 break;
             }
             case CmdKind::Press:
+            case CmdKind::Stick:
             case CmdKind::TraceFrame:
             case CmdKind::Shot: break;
         }
@@ -343,15 +380,21 @@ uint16_t Script::step(const Observation& o) {
         }
         if (!done) break;
         if (c.kind == CmdKind::Press) holds_.push_back({c.mask, o.frame + c.count});
+        if (c.kind == CmdKind::Stick) holds_.push_back({0, o.frame + c.count, c.sx, c.sy, true, c.sub});
         if (c.kind == CmdKind::Shot) shots_.push_back(c.text);
         if (c.kind == CmdKind::TraceFrame) traces_.push_back(c.count);
         ++pc_;
         started_ = false;
     }
     uint16_t buttons = 0;
+    sticks_ = Sticks();
     for (size_t i = 0; i < holds_.size();) {
         if (o.frame < holds_[i].until) {
             buttons |= holds_[i].mask;
+            if (holds_[i].stick) {  // the latest started hold of a stick wins
+                (holds_[i].sub ? sticks_.sub_x : sticks_.x) = holds_[i].sx;
+                (holds_[i].sub ? sticks_.sub_y : sticks_.y) = holds_[i].sy;
+            }
             ++i;
         } else {
             holds_.erase(holds_.begin() + long(i));

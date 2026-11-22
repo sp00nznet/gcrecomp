@@ -1,0 +1,6 @@
+# Tales of Symphonia: first steps in the classroom, after tos-classroom.txt. The main stick walks Lloyd, A talks.
+# One shot per step, to look at. (START does nothing in this scene; the menu is X, see tos-menu.txt.)
+stick up hold=60; wait 80; shot walk-up
+stick right hold=60; wait 80; shot walk-right
+stick down+left hold=90; wait 110; shot walk-downleft
+press A; wait 120; shot talk                      # talks to whoever is in front of Lloyd

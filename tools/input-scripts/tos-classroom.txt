@@ -1,0 +1,7 @@
+# Tales of Symphonia: the opening classroom scene, after tos-new-game.txt (run both:
+# tools/run-scripted.sh ... --script tos-new-game.txt --script tos-classroom.txt).
+# A every 45 frames advances the dialogue (about 600 s of real time at 60 Hz) until the game loads Lloyd's field
+# data (lloyd_ex.bin): the player then controls Lloyd in the classroom.
+press-until-file lloyd_ex.bin A every=45 hold=6 timeout=900
+wait 300                                          # the map settles
+shot classroom-control

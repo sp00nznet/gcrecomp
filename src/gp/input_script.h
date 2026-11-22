@@ -35,11 +35,13 @@ struct Observation {
     std::vector<std::string> files;         // disc files opened since the previous step, in order
 };
 
-enum class CmdKind { At, Press, Wait, WaitSeconds, WaitPresented, WaitFile, WaitChange, WaitStill, Shot, PressUntilFile, TraceFrame };
+enum class CmdKind { At, Press, Wait, WaitSeconds, WaitPresented, WaitFile, WaitChange, WaitStill, Shot, PressUntilFile, TraceFrame, Stick };
 
 struct Command {
     CmdKind kind = CmdKind::Wait;
     uint16_t mask = 0;       // Press: PAD_BUTTON_* bits
+    int8_t sx = 0, sy = 0;   // Stick: deflection (SDK units, -128..127, y up)
+    bool sub = false;        // Stick: the C-stick instead of the main stick
     std::vector<uint16_t> cycle;  // PressUntilFile: the presses, used in turn
     int count = 0;           // At: frame; Press: hold frames; Wait*/WaitStill: how many
     int every = 120;         // PressUntilFile: frames between presses
@@ -58,6 +60,9 @@ public:
 
     // Runs every command that is ready, then returns the buttons held this frame.
     uint16_t step(const Observation& o);
+    // The sticks held this frame, valid after step(): main stick and C-stick, SDK units (-128..127, y up).
+    struct Sticks { int8_t x = 0, y = 0, sub_x = 0, sub_y = 0; };
+    const Sticks& sticks() const { return sticks_; }
 
     bool empty() const { return cmds_.empty(); }
     bool finished() const { return pc_ >= cmds_.size(); }
@@ -73,7 +78,7 @@ public:
     const std::vector<Command>& commands() const { return cmds_; }
 
 private:
-    struct Hold { uint16_t mask; int until; };
+    struct Hold { uint16_t mask; int until; int8_t sx = 0, sy = 0; bool stick = false, sub = false; };
     std::vector<Command> cmds_;
     size_t pc_ = 0;
     bool started_ = false;
@@ -88,6 +93,7 @@ private:
     size_t cycle_pos_ = 0;
     size_t file_cursor_ = 0;  // index in the current Observation::files not yet consumed
     std::vector<Hold> holds_;
+    Sticks sticks_;
     std::vector<std::string> shots_, log_;
     std::vector<int> traces_;
 };

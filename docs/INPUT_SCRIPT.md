@@ -23,6 +23,8 @@ condition holds, `press` does not block (the button is held while later commands
 | --- | --- |
 | `press BTN[+BTN...] [hold=N]` | Holds the buttons for `N` frames (default 5) from this frame. |
 | `at N` | Waits until retrace frame `N` (1-based, counted from the start of the run). |
+| `stick X Y [hold=N]` / `stick DIR[+DIR...] [hold=N]` | Holds the main stick (`X`, `Y` in -128..127, y up; or `up`, `down`, `left`, `right` joined by `+`, which deflect to 100) for `N` frames (default 5): walking. `stick neutral` is a no-op that lasts `N` frames. |
+| `cstick ...` | Same for the C-stick (camera). |
 | `wait N` | Waits `N` retrace frames. |
 | `wait-seconds S` | Waits `S` seconds of wall time. |
 | `wait-presented N` | Waits until `N` more frames have been presented to the window. |
@@ -72,4 +74,7 @@ shot next
 
 * `tools/run-scripted.sh`: runs a harness with a script file, a fresh card image, screenshots and a log.
 * `tools/guest-stacks.sh PID [DEPTH]`: gdb backtraces of the guest threads of a running harness (guest call chain as `func_XXXXXXXX`).
+* `tools/card-check.py CARD [--files]`: independent validator of a card image (checksums, directory, block map, chains); `docs/GAMEPLAY_FINDINGS.md` records what the game writes.
+* `tools/run-scripted.sh --script A --script B`: segments run in order; `--card-in FILE` starts from a given card image.
+* `tools/input-scripts/tos-classroom.txt`, `tos-first-walk.txt`, `tos-menu.txt`: the next segments (the classroom cutscene, walking, the field menu; the last one is exploratory).
 * `tools/input-scripts/tos-new-game.txt`: example, Tales of Symphonia from a blank card to the opening classroom scene (the first dialogue).
