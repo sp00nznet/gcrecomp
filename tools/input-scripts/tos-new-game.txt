@@ -1,4 +1,5 @@
-# Tales of Symphonia (GQSF) from a blank card to the opening field scene. Inputs only, no game data.
+# Tales of Symphonia (GQSF) from a blank card to the opening scene (the classroom dialogue). Inputs only, no game data.
+# Needs about 170 s of wall time (the harness argument `seconds`: 220 is comfortable).
 # Blank card: 'Formater' (3rd entry) -> 'Oui' -> dismiss 'Formatage termine'.
 wait 200; press D; wait 20; press D; wait 20; press A
 wait 60; press U; wait 20; press A
@@ -9,6 +10,11 @@ wait-file title.tpl timeout=30
 wait 500
 press-until-file map/isa_i06 A every=100 hold=10  # Nouvelle partie
 press-until-file mov/s01 D A every=40             # 'Modifier les parametres?' -> 'Pas maintenant', if shown
-wait-file map/isa_t02 timeout=120
+wait-file map/isa_t02 timeout=120                 # after the 64 s movie mov/s01; the school corridor loads
+wait 800                                          # black screen, 'Lloyd Irving, reveille-toi!'
+shot field0
+press A                                           # the opening scene: Lloyd asleep in class, Raine wakes him
+wait 600
+press A
 wait 400
 shot field

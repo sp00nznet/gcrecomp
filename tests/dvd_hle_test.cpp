@@ -36,6 +36,15 @@ static int32_t call(const char* name, std::initializer_list<uint32_t> args) {
     return (int32_t)ctx.r[3];
 }
 
+static int g_cb_calls = 0;
+static int32_t g_cb_result = 0;
+static uint32_t g_cb_file = 0;
+static void test_callback(PPCContext* ctx, Memory*) {
+    ++g_cb_calls;
+    g_cb_result = (int32_t)ctx->r[3];
+    g_cb_file = ctx->r[4];
+}
+
 static void put_string(uint32_t addr, const char* s) {
     do g_mem.write8(addr++, (uint8_t)*s); while (*s++);
 }
@@ -75,6 +84,33 @@ int main() {
     CHECK_EQ(g_mem.read8(kBuf + 32), 0xAA);  // not past the request
     CHECK_EQ(call("DVDReadPrio", {kInfo, kBuf, 64, 0, 2}), 9);
     CHECK_EQ(call("DVDClose", {kInfo}), 1);
+
+    // Asynchronous reads: the data is there when the call returns, the callback runs afterwards (never inside the
+    // call: the game's loader marks its slot "loading" after the call returns and its callback marks it "loaded").
+    const uint32_t kCb = 0x80004000;
+    g_func_table.register_func(kCb, test_callback);
+    put_string(kPath, "mov/op.h4m");
+    CHECK_EQ(call("DVDOpen", {kPath, kInfo}), 1);
+    std::memset(g_mem.translate(kBuf), 0xAA, 64);
+    CHECK_EQ(call("DVDReadAsyncPrio", {kInfo, kBuf, 5, 4, kCb, 2}), 1);
+    CHECK_EQ(g_cb_calls, 0);
+    CHECK(std::memcmp(g_mem.translate(kBuf), "4 1.5", 5) == 0);
+    {
+        PPCContext ctx = {};
+        dvd_run_pending_callbacks(&ctx, &g_mem);
+    }
+    CHECK_EQ(g_cb_calls, 1);
+    CHECK_EQ(g_cb_result, 5);  // bytes transferred
+    CHECK_EQ(g_cb_file, kInfo);
+    CHECK_EQ(call("DVDReadAsync", {kInfo, kBuf, 5, 0, kCb}), 1);  // plain DVDReadAsync: no priority argument
+    CHECK_EQ(g_cb_calls, 1);
+    CHECK_EQ(call("DVDGetCommandBlockStatus", {kInfo}), 0);  // polling the drive delivers the callback, then reports idle
+    CHECK_EQ(g_cb_calls, 2);
+    CHECK_EQ(call("DVDReadAsyncPrio", {0x80600300, kBuf, 5, 0, kCb, 2}), 1);  // not an open file: the callback reports -1
+    CHECK_EQ(call("DVDGetDriveStatus", {}), 0);
+    CHECK_EQ(g_cb_calls, 3);
+    CHECK_EQ(g_cb_result, -1);
+    call("DVDClose", {kInfo});
 
     CHECK_EQ(call("DVDFastOpen", {0, kInfo2}), 0);        // the root directory is not a file
     CHECK_EQ(call("DVDFastOpen", {999, kInfo2}), 0);      // no such entry

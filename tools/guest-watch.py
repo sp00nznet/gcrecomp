@@ -13,7 +13,8 @@ runtime print, for each of the first GCRECOMP_WATCH_MAX (default 64) stores that
 where the numbers are the host call chain as offsets in the executable. This tool replaces them with the nearest
 symbol of the binary (`nm`): for a recompiled game these are the guest functions, func_80123456+0x1c, innermost
 first. The binary needs its symbols (no `strip`). --summary prints one line per distinct innermost function with
-its hit count instead of every line. Reads stdin when no log file is given.
+its hit count instead of every line. The `[bt] #N bt: ...` lines of `GP_TRACE_BT` (the call chain of a traced draw) are
+read the same way. Reads stdin when no log file is given.
 """
 import argparse
 import bisect
@@ -59,17 +60,18 @@ def main():
         i = bisect.bisect_right(addrs, off) - 1
         return f"{names[i]}+0x{off - addrs[i]:x}" if i >= 0 else f"0x{off:x}"
 
-    pat = re.compile(r"^(\[watch\] #\d+ write(\d+) (0x[0-9A-Fa-f]+) = 0x[0-9A-Fa-f]+) bt: (.*)$")
+    pat = re.compile(r"^(\[watch\] #\d+ write(\d+) (0x[0-9A-Fa-f]+) = 0x[0-9A-Fa-f]+|\[bt\](?: #\d+)?()()) bt: (.*)$")
     counts = Counter()
     for line in open(args.log) if args.log else sys.stdin:
         m = pat.match(line.rstrip("\n"))
         if not m:
             continue
-        frames = [sym(int(x, 16)) for x in m.group(4).split()]
+        frames = [sym(int(x, 16)) for x in m.group(6).split()]
         frames = [f for f in frames if "Memory::write" not in f and "Memory::watch" not in f][: args.depth]
         if args.summary:
             # the access width and the address modulo 4 tell the left half-word (+0) from the right one (+2)
-            counts[(frames[0] if frames else "?", f"write{m.group(2)} at +{int(m.group(3), 16) % 4}")] += 1
+            shape = f"write{m.group(2)} at +{int(m.group(3), 16) % 4}" if m.group(2) else "draw"
+            counts[(frames[0] if frames else "?", shape)] += 1
         else:
             print(m.group(1), "<-", " <- ".join(frames))
     for (name, shape), n in counts.most_common():

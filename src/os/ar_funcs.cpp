@@ -36,7 +36,9 @@ void call_guest(uint32_t fn, PPCContext* ctx, Memory* mem, uint32_t arg) {
 // type 0: main memory -> ARAM, type 1: ARAM -> main memory.
 bool dma(Memory* mem, uint32_t type, uint32_t main_addr, uint32_t aram_addr, uint32_t length) {
     if (aram_addr > kAramSize || length > kAramSize - aram_addr) {
-        std::printf("[AR] DMA out of range: aram=0x%08X length=0x%X\n", aram_addr, length);
+        std::printf("[AR] DMA out of range: aram=0x%08X length=0x%X\n[bt]", aram_addr, length);
+        print_call_chain(stdout);
+        std::printf("\n");
         return false;
     }
     uint8_t* host = mem->translate(main_addr);

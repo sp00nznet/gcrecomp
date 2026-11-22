@@ -790,35 +790,6 @@ static void dvd_read_prio(PPCContext* ctx, Memory* mem) {
     }
 }
 
-// DVDReadAsync(DVDFileInfo* info, void* buf, int32_t len, int32_t off, DVDCallback cb)
-// Implemented as synchronous read + immediate callback invocation.
-static void dvd_read_async(PPCContext* ctx, Memory* mem) {
-    uint32_t info_addr = ctx->r[3];
-    uint32_t buf_addr  = ctx->r[4];
-    int32_t  length    = (int32_t)ctx->r[5];
-    int32_t  offset    = (int32_t)ctx->r[6];
-    uint32_t callback  = ctx->r[7];
-
-    auto it = g_open_dvd_files.find(info_addr);
-    if (it != g_open_dvd_files.end()) {
-        FILE* fp = it->second;
-        fseek(fp, offset, SEEK_SET);
-        uint8_t* dst = mem->translate(buf_addr);
-        if (dst) fread(dst, 1, length, fp);
-    }
-
-    // If there's a callback, invoke it synchronously
-    if (callback) {
-        uint32_t save_r3 = ctx->r[3];
-        ctx->r[3] = info_addr;
-        ctx->r[4] = 0; // result = success
-        g_func_table.call(callback, ctx, mem);
-        ctx->r[3] = save_r3;
-    }
-
-    ctx->r[3] = 1; // Success
-}
-
 // =============================================================================
 // Disc Image (ISO) Support
 //
@@ -1173,7 +1144,6 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDFastOpen",            dvd_fast_open },
     { "DVDClose",               dvd_close },
     { "DVDReadPrio",            dvd_read_prio },
-    { "DVDReadAsync",           dvd_read_async },
 
     // --- Sound setting ---
     { "OSGetSoundMode",         os_get_sound_mode },

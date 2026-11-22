@@ -496,6 +496,23 @@ private:
                          trace_n, unsigned(prim), count, l.size, s.vcd_lo, s.vcd_hi, s.bp[0], ((s.bp[0] >> 10) & 0xF) + 1, s.bp[0x40], s.bp[0x41], s.bp[0xF3],
                          s.bp[0xC0], s.bp[0xC1], s.bp[0x28], s.bp[0x88], s.bp[0x94], num_texgens, p0, p1, p2, p3, p4, p5, ortho, s.xf_float(0x101A),
                          s.xf_float(0x101B), s.xf_float(0x101D), s.xf_float(0x101E));
+            // GP_TRACE_BT=first-last (or `ortho`): the guest call chain that fed those draws, as `[bt] #N bt: ...`
+            // lines for tools/guest-watch.py (which guest code draws the fade quad, the HUD...).
+            static int bt_first = -1, bt_last = -1;
+            static bool bt_ortho = false;
+            static const bool bt_parsed = [] {
+                if (const char* e = std::getenv("GP_TRACE_BT")) {
+                    if (!std::strcmp(e, "ortho")) bt_ortho = true;
+                    else if (std::sscanf(e, "%d-%d", &bt_first, &bt_last) == 1) bt_last = bt_first;
+                }
+                return true;
+            }();
+            (void)bt_parsed;
+            if ((trace_n >= bt_first && trace_n <= bt_last) || (bt_ortho && ortho)) {
+                std::fprintf(stderr, "[bt] #%d", trace_n);
+                print_call_chain(stderr);
+                std::fprintf(stderr, "\n");
+            }
         }
         const uint8_t* p = data;
         for (uint32_t v = 0; v < count; ++v) {

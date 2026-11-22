@@ -10,6 +10,7 @@ Switches and tools for finding out why a frame looks wrong. Nothing here needs a
 | `GP_TRACE_FRAME=N` | Prints one line per draw of presented frame `N` (primitive, vertex count, VCD, TEV stage 0, Z mode, blend, alpha compare, texture 0, projection, viewport), then for the first 60 draws the first vertex in clip space and normalised device coordinates, its lighting inputs and result, and for the first 3 draws four vertices with the position matrix rows they were transformed with. Frame numbers count EFB copies to the XFB (`[gp] N frames` at exit). A `[COPY]` line follows the draws with the EFB copies of that frame (destination, format, pixel format, clear). With the script command `trace-frame` (docs/INPUT_SCRIPT.md) the frame is chosen by an event instead of a number. |
 | `GP_TRACE_DRAWS=first-last` | With `GP_TRACE_FRAME`: only the draws numbered first..last (as printed) are rendered in that frame, to see what a group of draws contributes (compare screenshots of two ranges). |
 | `GP_TRACE_VERTS=first-last` or `ortho` | With `GP_TRACE_FRAME`: prints every vertex (position, vertex colour 0, lit channel 0, first texture coordinates) of those draws, or of every draw with an orthographic projection (the 2D overlays, fades, windows). The last draw of a black frame is often a fade overlay: its vertex alpha says whether the game asked for black. |
+| `GP_TRACE_BT=first-last` or `ortho` | With `GP_TRACE_FRAME`: prints `[bt] #N bt: ...` (the host call chain, as `GCRECOMP_WATCH` does) for those draws; `tools/guest-watch.py --bin BINARY LOG` names the guest functions: which game code issued the fade quad, a window, the HUD. |
 | `GP_TRACE_STATE=n[,m...]` | With `GP_TRACE_FRAME`: dumps the full TEV, texgen, texture-map and raster state at those draws. |
 | `GP_CULL=none` | Disables face culling (a quick test for geometry that vanishes). |
 | `GP_DUMP_TEX=dir` | Writes the textures the game uses as PPM files (`tex_NN_fmtF_WxH_ADDR.ppm`, alpha shown over grey). Each (address, format, size) is written once. |
@@ -65,6 +66,22 @@ one representation: `f[i]` is ps0 and `ps1[i]` is ps1; every scalar FP instructi
 `psq_l` / `psq_st` goes through those two, and `tests/ps_semantics_test.cpp` runs the emitted code of a set of
 instructions against hand-computed results (including a destination register that is also a source, and the
 quantised load/store with saturation and signed scales).
+
+## A screen that stays black (a fade that never ends)
+
+The picture is rendered but a full-screen quad of the game's fade covers it. Find what the game waits for:
+
+1. `GP_TRACE_FRAME=N` (or the script command `trace-frame`) with `GP_TRACE_VERTS=ortho GP_TRACE_BT=ortho` prints the
+   overlay's vertices and the guest call chain that drew it (`tools/guest-watch.py` names the functions). The vertex
+   alpha is read by that function from a global (the fade state: alpha, rate, a flag).
+2. `GCRECOMP_WATCH=` on those globals (SDA-relative: `r13 + offset`, `r13` is the value `__start` loads) shows which guest
+   functions start, step and end the fade, and the values they write. A fade that is never started again means the
+   code that starts it is not reached: the game state machine is waiting for something else.
+3. Asynchronous completions are the usual suspect. The SDK delivers callbacks (DVD reads, card operations) from an
+   interrupt, after the call returned. A replacement that runs the callback inside the call breaks code that sets its
+   own "busy" state after the call (Tales of Symphonia's file loader: slot state 2 "loading" written after the call
+   returns, 3 "loaded" written by the callback); the loader then waits forever. `src/os/dvd_funcs.cpp` and
+   `src/os/card_funcs.cpp` queue the callbacks and run them from the retrace interrupt and from status polls.
 
 ## Audio
 

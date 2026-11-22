@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -307,6 +308,9 @@ uint64_t last_dispatch(uint32_t* addr, uint32_t* lr);
 // Debug facilities that are timed (GCRECOMP_WATCH, GCRECOMP_TRACE_CALLS) only act once GCRECOMP_DEBUG_AFTER seconds
 // of wall-clock time have passed since the first call (default 0: always), to skip a boot phase or an earlier scene.
 bool debug_armed();
+// Appends " bt: OFF OFF ..." (the host call chain as offsets in the executable, innermost first) to `out`; no newline.
+// tools/guest-watch.py names the offsets (guest functions of a recompiled game).
+void print_call_chain(std::FILE* out);
 
 // =============================================================================
 // Global runtime state
@@ -434,6 +438,9 @@ void set_card_image(const std::string& path, size_t size_bytes = 0x200000);
 // from an interrupt after the call returned; here they run when the game polls the card or waits for
 // a retrace (VIWaitForRetrace calls this).
 void card_run_pending_callbacks(PPCContext* ctx, Memory* mem);
+// The same for DVDReadAsync / DVDReadAsyncPrio: the data is in memory when the call returns, the callback runs
+// afterwards (from the retrace interrupt, or when the game polls DVDGetDriveStatus / DVDGetCommandBlockStatus).
+void dvd_run_pending_callbacks(PPCContext* ctx, Memory* mem);
 
 // Mount a GameCube ISO disc image. Parses the disc header, loads the FST
 // (File System Table) into emulated memory, and enables DVD reads directly

@@ -290,8 +290,11 @@ void fire_retrace(Lock& lk) {
             if (g_retrace_hook) g_retrace_hook();  // the host's window events
         },
         [&](PPCContext* c) {
-            // Asynchronous memory card operations complete from an interrupt as well.
-            if (deliver) card_run_pending_callbacks(c, mem);
+            // Asynchronous memory card operations and disc reads complete from an interrupt as well.
+            if (deliver) {
+                card_run_pending_callbacks(c, mem);
+                dvd_run_pending_callbacks(c, mem);
+            }
         });
     if (!vi::display_interrupt_pending(vi_regs)) put_be32(pi_cause, be32_at(pi_cause) & ~vi::kPiCauseVi);
     update_deadline();
