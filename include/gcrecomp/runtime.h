@@ -96,16 +96,13 @@ struct alignas(16) PPCContext {
     // General Purpose Registers (r0-r31) -- 32-bit integer registers
     uint32_t r[32];
 
-    // Floating Point Registers (f0-f31) -- 64-bit double-precision
-    // The Gekko FPU operates in double precision; single-precision results
-    // are rounded and stored in the upper half.
+    // Floating Point Registers (f0-f31) -- 64-bit double-precision.
+    // f[i] is also ps0 of the paired-single view of register i: there is exactly one copy of it, so
+    // scalar FP instructions, ps_* instructions and psq_l/psq_st all see the same value.
     double f[32];
 
-    // Paired Singles registers (ps0/ps1 for each FPR)
-    // The Gekko extends each FPR with a second single-precision slot.
-    // ps[i][0] = ps0 (same value as the single-precision view of f[i])
-    // ps[i][1] = ps1 (paired single extension, used by ps_* instructions)
-    float ps[32][2];
+    // ps1 of each register (the second slot of the Gekko's paired singles). Always a single-precision value.
+    float ps1[32];
 
     // Condition Register (8 x 4-bit fields = 32 bits total)
     // CR0-CR7, each containing LT/GT/EQ/SO bits.

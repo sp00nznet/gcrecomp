@@ -292,8 +292,15 @@ GLuint texture_for_map(const State& s, int map) {
         };
         const std::vector<uint8_t> rgba = decode_level(0);
         if (const char* dir = std::getenv("GP_DUMP_TEX")) {
+            // GP_DUMP_TEX_MAX: how many textures to write (default 24); GP_DUMP_TEX_AFTER: only once this many
+            // frames have been presented (skips the textures of earlier scenes, such as a movie).
             static int dumped = 0;
-            if (dumped < 24) {
+            static const int max_dump = std::getenv("GP_DUMP_TEX_MAX") ? std::atoi(std::getenv("GP_DUMP_TEX_MAX")) : 24;
+            static const long after = std::getenv("GP_DUMP_TEX_AFTER") ? std::atol(std::getenv("GP_DUMP_TEX_AFTER")) : 0;
+            // A texture is written once per (address, format, size): a movie re-uploading into one buffer is dumped once.
+            static std::unordered_map<uint64_t, bool> seen;
+            const uint64_t key = (uint64_t(addr) << 32) ^ (uint64_t(fmt) << 28) ^ (uint64_t(w) << 14) ^ h;
+            if (dumped < max_dump && long(g_frames) >= after && seen.emplace(key, true).second) {
                 char path[512];
                 std::snprintf(path, sizeof(path), "%s/tex_%02d_fmt%X_%ux%u_%06X.ppm", dir, dumped++, fmt, w, h, addr);
                 if (FILE* f = std::fopen(path, "wb")) {

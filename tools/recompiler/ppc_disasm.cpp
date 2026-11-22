@@ -65,6 +65,20 @@ static PPCInsn decode_op4(uint32_t raw, uint32_t addr) {
         default: break;
     }
 
+    // Indexed quantized load/store: the 6-bit extended opcode is in bits 1-6; bits 7-9 are the GQR index, bit 10 is W.
+    switch ((raw >> 1) & 0x3F) {
+        case 6: case 7: case 38: case 39: {
+            const uint32_t x6 = (raw >> 1) & 0x3F;
+            insn.type = x6 == 6 ? PPCInsnType::PSQ_LX : x6 == 7 ? PPCInsnType::PSQ_STX : x6 == 38 ? PPCInsnType::PSQ_LUX : PPCInsnType::PSQ_STUX;
+            insn.mnemonic = x6 == 6 ? "psq_lx" : x6 == 7 ? "psq_stx" : x6 == 38 ? "psq_lux" : "psq_stux";
+            insn.rs = PPC_FS(raw);
+            insn.psq_w = (raw >> 10) & 1;
+            insn.psq_i = (raw >> 7) & 7;
+            return insn;
+        }
+        default: break;
+    }
+
     switch (xo5) {
         case 10: insn.type = PPCInsnType::PS_SUM0;    insn.mnemonic = "ps_sum0"; return insn;
         case 11: insn.type = PPCInsnType::PS_SUM1;    insn.mnemonic = "ps_sum1"; return insn;

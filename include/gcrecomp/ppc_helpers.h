@@ -12,6 +12,7 @@
 // pass g_mem are defined in the auto-generated recomp_common.h.
 // =============================================================================
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include "gcrecomp/runtime.h"
@@ -100,46 +101,84 @@ enum PSQ_Type : uint32_t {
     PSQ_TYPE_S16   = 7,
 };
 
-inline float psq_load_one(gcrecomp::Memory& mem, uint32_t addr, uint32_t gqr) {
-    uint32_t type  = gqr & 0x7;
-    uint32_t scale = (gqr >> 8) & 0x3F;
-    float divisor  = static_cast<float>(1u << scale);
+// The scale fields of a GQR are 6-bit two's complement exponents: a load divides by 2^scale, a store multiplies.
+inline float psq_scale(uint32_t field) { return std::ldexp(1.0f, static_cast<int>(field ^ 0x20u) - 0x20); }
+
+inline float psq_dequant(uint32_t raw, uint32_t type, float inv_scale_exp) {
     switch (type) {
-        case PSQ_TYPE_FLOAT: { uint32_t raw = mem.read32(addr); float val; memcpy(&val, &raw, 4); return val; }
-        case PSQ_TYPE_U8:  return static_cast<float>(mem.read8(addr)) / divisor;
-        case PSQ_TYPE_S8:  return static_cast<float>(static_cast<int8_t>(mem.read8(addr))) / divisor;
-        case PSQ_TYPE_U16: return static_cast<float>(mem.read16(addr)) / divisor;
-        case PSQ_TYPE_S16: return static_cast<float>(static_cast<int16_t>(mem.read16(addr))) / divisor;
-        default: return 0.0f;
+        case PSQ_TYPE_U8:  return static_cast<float>(static_cast<uint8_t>(raw)) * inv_scale_exp;
+        case PSQ_TYPE_S8:  return static_cast<float>(static_cast<int8_t>(raw)) * inv_scale_exp;
+        case PSQ_TYPE_U16: return static_cast<float>(static_cast<uint16_t>(raw)) * inv_scale_exp;
+        default:           return static_cast<float>(static_cast<int16_t>(raw)) * inv_scale_exp;
     }
 }
 
-inline void psq_load_pair(gcrecomp::Memory& mem, float* ps0, float* ps1, uint32_t addr, uint32_t gqr) {
-    uint32_t type  = gqr & 0x7;
-    uint32_t scale = (gqr >> 8) & 0x3F;
-    float divisor  = static_cast<float>(1u << scale);
+// Quantize for a store: multiply by the scale, truncate toward zero and saturate to the integer type
+// (NaN saturates low, like the hardware's conversion).
+inline uint32_t psq_quant(float v, uint32_t type, float mul) {
+    float lo, hi;
     switch (type) {
-        case PSQ_TYPE_FLOAT: { uint32_t r0 = mem.read32(addr); uint32_t r1 = mem.read32(addr+4); memcpy(ps0, &r0, 4); memcpy(ps1, &r1, 4); break; }
-        case PSQ_TYPE_U8:  *ps0 = static_cast<float>(mem.read8(addr))/divisor; *ps1 = static_cast<float>(mem.read8(addr+1))/divisor; break;
-        case PSQ_TYPE_S8:  *ps0 = static_cast<float>(static_cast<int8_t>(mem.read8(addr)))/divisor; *ps1 = static_cast<float>(static_cast<int8_t>(mem.read8(addr+1)))/divisor; break;
-        case PSQ_TYPE_U16: *ps0 = static_cast<float>(mem.read16(addr))/divisor; *ps1 = static_cast<float>(mem.read16(addr+2))/divisor; break;
-        case PSQ_TYPE_S16: *ps0 = static_cast<float>(static_cast<int16_t>(mem.read16(addr)))/divisor; *ps1 = static_cast<float>(static_cast<int16_t>(mem.read16(addr+2)))/divisor; break;
-        default: *ps0 = *ps1 = 0.0f; break;
+        case PSQ_TYPE_U8:  lo = 0.0f;      hi = 255.0f;   break;
+        case PSQ_TYPE_S8:  lo = -128.0f;   hi = 127.0f;   break;
+        case PSQ_TYPE_U16: lo = 0.0f;      hi = 65535.0f; break;
+        default:           lo = -32768.0f; hi = 32767.0f; break;
+    }
+    float t = v * mul;
+    if (!(t > lo)) t = lo;
+    if (t > hi) t = hi;
+    return static_cast<uint32_t>(static_cast<int32_t>(t));
+}
+
+inline uint32_t psq_elem_size(uint32_t type) { return (type == PSQ_TYPE_U8 || type == PSQ_TYPE_S8) ? 1 : (type == PSQ_TYPE_FLOAT ? 4 : 2); }
+
+inline uint32_t psq_read_raw(gcrecomp::Memory& mem, uint32_t addr, uint32_t type) {
+    switch (psq_elem_size(type)) {
+        case 1: return mem.read8(addr);
+        case 2: return mem.read16(addr);
+        default: return mem.read32(addr);
+    }
+}
+
+inline float psq_load_elem(gcrecomp::Memory& mem, uint32_t addr, uint32_t type, float inv_scale) {
+    // Types 1-3 are reserved; the hardware treats them as float.
+    if (type < PSQ_TYPE_U8) {
+        const uint32_t raw = mem.read32(addr);
+        float val;
+        memcpy(&val, &raw, 4);
+        return val;
+    }
+    return psq_dequant(psq_read_raw(mem, addr, type), type, inv_scale);
+}
+
+inline float psq_load_one(gcrecomp::Memory& mem, uint32_t addr, uint32_t gqr) {
+    const uint32_t type = gqr & 0x7;
+    return psq_load_elem(mem, addr, type, 1.0f / psq_scale((gqr >> 8) & 0x3F));
+}
+
+inline void psq_load_pair(gcrecomp::Memory& mem, float* ps0, float* ps1, uint32_t addr, uint32_t gqr) {
+    const uint32_t type = gqr & 0x7;
+    const float inv = 1.0f / psq_scale((gqr >> 8) & 0x3F);
+    const uint32_t step = type < PSQ_TYPE_U8 ? 4 : psq_elem_size(type);
+    *ps0 = psq_load_elem(mem, addr, type, inv);
+    *ps1 = psq_load_elem(mem, addr + step, type, inv);
+}
+
+inline void psq_store_elem(gcrecomp::Memory& mem, float val, uint32_t addr, uint32_t type, float mul) {
+    if (type < PSQ_TYPE_U8) {
+        uint32_t raw;
+        memcpy(&raw, &val, 4);
+        mem.write32(addr, raw);
+        return;
+    }
+    const uint32_t q = psq_quant(val, type, mul);
+    switch (psq_elem_size(type)) {
+        case 1: mem.write8(addr, static_cast<uint8_t>(q)); break;
+        default: mem.write16(addr, static_cast<uint16_t>(q)); break;
     }
 }
 
 inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint32_t gqr) {
-    uint32_t type  = (gqr >> 16) & 0x7;
-    uint32_t scale = (gqr >> 24) & 0x3F;
-    float mul = static_cast<float>(1u << scale);
-    switch (type) {
-        case PSQ_TYPE_FLOAT: { uint32_t raw; memcpy(&raw, &val, 4); mem.write32(addr, raw); break; }
-        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(val*mul)); break;
-        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(val*mul))); break;
-        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(val*mul)); break;
-        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(val*mul))); break;
-        default: break;
-    }
+    psq_store_elem(mem, val, addr, (gqr >> 16) & 0x7, psq_scale((gqr >> 24) & 0x3F));
 }
 
 // A store to the write-gather pipe (0xCC008000) feeds the same FIFO address, so the second element
@@ -147,15 +186,20 @@ inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint3
 inline uint32_t psq_next_addr(uint32_t addr, uint32_t step) { return addr == 0xCC008000u ? addr : addr + step; }
 
 inline void psq_store_pair(gcrecomp::Memory& mem, float v0, float v1, uint32_t addr, uint32_t gqr) {
-    uint32_t type  = (gqr >> 16) & 0x7;
-    uint32_t scale = (gqr >> 24) & 0x3F;
-    float mul = static_cast<float>(1u << scale);
-    switch (type) {
-        case PSQ_TYPE_FLOAT: { uint32_t r0,r1; memcpy(&r0,&v0,4); memcpy(&r1,&v1,4); mem.write32(addr,r0); mem.write32(psq_next_addr(addr, 4),r1); break; }
-        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(v0*mul)); mem.write8(psq_next_addr(addr, 1), static_cast<uint8_t>(v1*mul)); break;
-        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(v0*mul))); mem.write8(psq_next_addr(addr, 1), static_cast<uint8_t>(static_cast<int8_t>(v1*mul))); break;
-        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(v0*mul)); mem.write16(psq_next_addr(addr, 2), static_cast<uint16_t>(v1*mul)); break;
-        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(v0*mul))); mem.write16(psq_next_addr(addr, 2), static_cast<uint16_t>(static_cast<int16_t>(v1*mul))); break;
-        default: break;
-    }
+    const uint32_t type = (gqr >> 16) & 0x7;
+    const float mul = psq_scale((gqr >> 24) & 0x3F);
+    const uint32_t step = type < PSQ_TYPE_U8 ? 4 : psq_elem_size(type);
+    psq_store_elem(mem, v0, addr, type, mul);
+    psq_store_elem(mem, v1, psq_next_addr(addr, step), type, mul);
 }
+
+// fctiwz / fctiw: the result integer goes to the low word of the register. Both saturate; NaN gives 0x80000000.
+inline uint64_t ppc_fctiwz(double v) {
+    if (v != v) return 0x80000000u;
+    if (v >= 2147483648.0) return 0x7FFFFFFFu;
+    if (v <= -2147483648.0) return 0x80000000u;
+    return static_cast<uint32_t>(static_cast<int32_t>(v));
+}
+
+// Round to nearest, ties to even (FPSCR RN = 0, the only mode games use).
+inline uint64_t ppc_fctiw(double v) { return v != v ? 0x80000000u : ppc_fctiwz(std::nearbyint(v)); }

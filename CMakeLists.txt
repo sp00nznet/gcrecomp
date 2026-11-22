@@ -263,6 +263,20 @@ if(GCRECOMP_BUILD_TOOLS)
         add_executable(recompiler_rc_test tests/recompiler_rc_test.cpp)
         target_link_libraries(recompiler_rc_test PRIVATE gcrecomp_tools)
         add_test(NAME recompiler_rc COMMAND recompiler_rc_test)
+        if(GCRECOMP_BUILD_RUNTIME)
+            # Floating-point / paired-single semantics of the emitted code: the generator runs the emitter at
+            # build time, the test compiles and runs the result.
+            add_executable(ps_semantics_gen tests/ps_semantics_gen.cpp)
+            target_link_libraries(ps_semantics_gen PRIVATE gcrecomp_tools)
+            add_custom_command(
+                OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ps_semantics.inc
+                COMMAND ps_semantics_gen ${CMAKE_CURRENT_BINARY_DIR}/ps_semantics.inc
+                DEPENDS ps_semantics_gen tests/ps_semantics_cases.h)
+            add_executable(ps_semantics_test tests/ps_semantics_test.cpp ${CMAKE_CURRENT_BINARY_DIR}/ps_semantics.inc)
+            target_include_directories(ps_semantics_test PRIVATE include tests ${CMAKE_CURRENT_BINARY_DIR})
+            target_link_libraries(ps_semantics_test PRIVATE gcrecomp_runtime)
+            add_test(NAME ps_semantics COMMAND ps_semantics_test)
+        endif()
     endif()
 endif()
 

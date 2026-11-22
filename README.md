@@ -287,6 +287,13 @@ or recompilation.
   python tools/dolphin_dump.py > capture.json
   ```
 
+- **`frame_compare.py`**: compares a gcrecomp screenshot with a reference frame (e.g. from Dolphin's
+  frame dump): error figures, a luminance grid of both and a side-by-side image.
+  `python3 tools/frame_compare.py ours.ppm reference.png --out sheet.png`
+- **`prune_frames.sh`**: keeps the newest N files of a frame-dump directory while an emulator writes it.
+- GP debug switches (`GP_TRACE_FRAME`, `GP_DUMP_TEX`, ...) and the instruction-semantics test are described
+  in [docs/DEBUGGING.md](docs/DEBUGGING.md).
+
 ## Want to Recomp Your Favorite GameCube Game?
 
 Here's the rough roadmap for bringing up a new title:

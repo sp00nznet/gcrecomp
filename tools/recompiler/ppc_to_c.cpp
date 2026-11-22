@@ -37,6 +37,36 @@ namespace gcrecomp {
         va_end(args);
     }
 
+    // A single-precision scalar result (fadds, fmuls, fmadds, frsp, fres ...): rounded to single and written to both
+    // halves of the register, ps0 (the double f[d]) and ps1. `fmt` is the expression, in terms of the operands'
+    // double registers; operands are NOT rounded to single first, which would break the common int-to-float
+    // trick (subtracting 2^52 from 2^52 + n).
+    static void emit_fs(PPCToCEmitter& e, unsigned d, const char* fmt, ...) {
+        char expr[256];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(expr, sizeof expr, fmt, args);
+        va_end(args);
+        e.emit("{ float r = (float)(%s); ctx->f[%u] = (double)r; ctx->ps1[%u] = r; }", expr, d, d);
+    }
+
+    // A paired-single instruction: both result lanes are computed from the operands as they were before the
+    // instruction (the destination may be one of the sources), then written. `ops` lists the operands the
+    // expressions use ("a", "b", "c" for frA, frB, frC); the expressions name their lanes a0 a1 b0 b1 c0 c1.
+    static void emit_ps(PPCToCEmitter& e, const char* ops, const PPCInsn& insn, const char* e0, const char* e1) {
+        std::string line = "{";
+        for (const char* o = ops; *o; ++o) {
+            const unsigned r = *o == 'a' ? insn.ra : *o == 'b' ? insn.rb : insn.rc_reg;
+            char buf[160];
+            std::snprintf(buf, sizeof buf, " [[maybe_unused]] const float %c0 = (float)ctx->f[%u], %c1 = ctx->ps1[%u];", *o, r, *o, r);
+            line += buf;
+        }
+        char buf[320];
+        std::snprintf(buf, sizeof buf, " const float r0 = %s, r1 = %s; ctx->f[%u] = (double)r0; ctx->ps1[%u] = r1; }", e0, e1,
+                      insn.rd, insn.rd);
+        e.emit("%s", (line + buf).c_str());
+    }
+
     std::string PPCToCEmitter::name_for(uint32_t addr) const {
         // A Ghidra symbol map, when supplied, carries real names rather
         // than func_XXXXXXXX. Checked first so symbols apply at every
@@ -522,10 +552,10 @@ namespace gcrecomp {
             break;
 
         // ==== Load/Store Float ====
+        // A single-precision load fills ps0 and ps1 with the value; ps0 is f[]. A double load leaves ps1 alone.
         case PPCInsnType::LFS:
-            emit("ctx->f[%u] = (double)MEM_READF32(%s + %d); ctx->ps[%u][0] = ctx->ps[%u][1] = MEM_READF32(%s + %d);",
-                 insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.simm,
-                 insn.rd, insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.simm);
+            emit("{ float v = MEM_READF32(%s + %d); ctx->f[%u] = (double)v; ctx->ps1[%u] = v; }",
+                 insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.simm, insn.rd, insn.rd);
             break;
 
         case PPCInsnType::LFD:
@@ -545,8 +575,8 @@ namespace gcrecomp {
 
         // Float load/store with update
         case PPCInsnType::LFSU:
-            emit("ctx->r[%u] += %d; ctx->f[%u] = (double)MEM_READF32(ctx->r[%u]); ctx->ps[%u][0] = ctx->ps[%u][1] = (float)ctx->f[%u];",
-                 insn.ra, insn.simm, insn.rd, insn.ra, insn.rd, insn.rd, insn.rd);
+            emit("ctx->r[%u] += %d; { float v = MEM_READF32(ctx->r[%u]); ctx->f[%u] = (double)v; ctx->ps1[%u] = v; }",
+                 insn.ra, insn.simm, insn.ra, insn.rd, insn.rd);
             break;
         case PPCInsnType::LFDU:
             emit("ctx->r[%u] += %d; ctx->f[%u] = MEM_READF64(ctx->r[%u]);",
@@ -563,9 +593,8 @@ namespace gcrecomp {
 
         // Float load/store indexed
         case PPCInsnType::LFSX:
-            emit("ctx->f[%u] = (double)MEM_READF32(%s + ctx->r[%u]); ctx->ps[%u][0] = ctx->ps[%u][1] = MEM_READF32(%s + ctx->r[%u]);",
-                 insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb,
-                 insn.rd, insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb);
+            emit("{ float v = MEM_READF32(%s + ctx->r[%u]); ctx->f[%u] = (double)v; ctx->ps1[%u] = v; }",
+                 insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb, insn.rd, insn.rd);
             break;
         case PPCInsnType::LFDX:
             emit("ctx->f[%u] = MEM_READF64(%s + ctx->r[%u]);",
@@ -582,8 +611,8 @@ namespace gcrecomp {
 
         // Float indexed with update
         case PPCInsnType::LFSUX:
-            emit("ctx->r[%u] = ctx->r[%u] + ctx->r[%u]; ctx->f[%u] = (double)MEM_READF32(ctx->r[%u]); ctx->ps[%u][0] = ctx->ps[%u][1] = (float)ctx->f[%u];",
-                 insn.ra, insn.ra, insn.rb, insn.rd, insn.ra, insn.rd, insn.rd, insn.rd);
+            emit("ctx->r[%u] = ctx->r[%u] + ctx->r[%u]; { float v = MEM_READF32(ctx->r[%u]); ctx->f[%u] = (double)v; ctx->ps1[%u] = v; }",
+                 insn.ra, insn.ra, insn.rb, insn.ra, insn.rd, insn.rd);
             break;
         case PPCInsnType::LFDUX:
             emit("ctx->r[%u] = ctx->r[%u] + ctx->r[%u]; ctx->f[%u] = MEM_READF64(ctx->r[%u]);",
@@ -603,20 +632,16 @@ namespace gcrecomp {
         // round the result to single. Rounding the operands first would break the common
         // int-to-float trick (subtracting 2^52 from 2^52 + n).
         case PPCInsnType::FADDS:
-            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] + ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.rd);
+            emit_fs(*this, insn.rd, "ctx->f[%u] + ctx->f[%u]", insn.ra, insn.rb);
             break;
         case PPCInsnType::FSUBS:
-            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] - ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.rd);
+            emit_fs(*this, insn.rd, "ctx->f[%u] - ctx->f[%u]", insn.ra, insn.rb);
             break;
         case PPCInsnType::FMULS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] * (float)ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rd, insn.rd);
+            emit_fs(*this, insn.rd, "(float)ctx->f[%u] * (float)ctx->f[%u]", insn.ra, insn.rc_reg);
             break;
         case PPCInsnType::FDIVS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] / (float)ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.rd);
+            emit_fs(*this, insn.rd, "(float)ctx->f[%u] / (float)ctx->f[%u]", insn.ra, insn.rb);
             break;
         case PPCInsnType::FADD:
             emit("ctx->f[%u] = ctx->f[%u] + ctx->f[%u];", insn.rd, insn.ra, insn.rb);
@@ -632,20 +657,16 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::FMADDS:
-            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] * ctx->f[%u] + ctx->f[%u]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "ctx->f[%u] * ctx->f[%u] + ctx->f[%u]", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMSUBS:
-            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] * ctx->f[%u] - ctx->f[%u]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "ctx->f[%u] * ctx->f[%u] - ctx->f[%u]", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMSUBS:
-            emit("ctx->f[%u] = (double)(float)-(ctx->f[%u] * ctx->f[%u] - ctx->f[%u]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "-(ctx->f[%u] * ctx->f[%u] - ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMADDS:
-            emit("ctx->f[%u] = (double)(float)-(ctx->f[%u] * ctx->f[%u] + ctx->f[%u]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "-(ctx->f[%u] * ctx->f[%u] + ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMADD:
             emit("ctx->f[%u] = ctx->f[%u] * ctx->f[%u] + ctx->f[%u];", insn.rd, insn.ra, insn.rc_reg, insn.rb);
@@ -661,7 +682,7 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::FRES:
-            emit("ctx->f[%u] = 1.0 / ctx->f[%u];", insn.rd, insn.rb);
+            emit_fs(*this, insn.rd, "1.0 / ctx->f[%u]", insn.rb);
             break;
         case PPCInsnType::FRSQRTE:
             emit("ctx->f[%u] = 1.0 / sqrt(ctx->f[%u]);", insn.rd, insn.rb);
@@ -683,16 +704,14 @@ namespace gcrecomp {
             emit("ctx->f[%u] = -fabs(ctx->f[%u]);", insn.rd, insn.rb);
             break;
         case PPCInsnType::FRSP:
-            emit("ctx->f[%u] = (double)(float)ctx->f[%u]; ctx->ps[%u][0] = (float)ctx->f[%u];",
-                 insn.rd, insn.rb, insn.rd, insn.rd);
+            emit_fs(*this, insn.rd, "ctx->f[%u]", insn.rb);
             break;
+        // The integer goes to the low word; conversion saturates (NaN gives 0x80000000).
         case PPCInsnType::FCTIWZ:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
-                 insn.rb, insn.rd);
+            emit("{ uint64_t tmp = ppc_fctiwz(ctx->f[%u]); std::memcpy(&ctx->f[%u], &tmp, 8); }", insn.rb, insn.rd);
             break;
         case PPCInsnType::FCTIW:
-            emit("{ int32_t v = (int32_t)ctx->f[%u]; uint64_t tmp = (uint64_t)(uint32_t)v; std::memcpy(&ctx->f[%u], &tmp, 8); }",
-                 insn.rb, insn.rd);
+            emit("{ uint64_t tmp = ppc_fctiw(ctx->f[%u]); std::memcpy(&ctx->f[%u], &tmp, 8); }", insn.rb, insn.rd);
             break;
         case PPCInsnType::MFFS:
             emit("{ uint64_t v = (uint64_t)ctx->fpscr; std::memcpy(&ctx->f[%u], &v, 8); }", insn.rd);
@@ -710,121 +729,91 @@ namespace gcrecomp {
 
         // ==== Paired Singles (the GameCube special sauce) ====
         case PPCInsnType::PS_ADD:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] + ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] + ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.ra, insn.rb);
+            emit_ps(*this, "ab", insn, "a0 + b0", "a1 + b1");
             break;
         case PPCInsnType::PS_SUB:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] - ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] - ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.ra, insn.rb);
+            emit_ps(*this, "ab", insn, "a0 - b0", "a1 - b1");
             break;
         case PPCInsnType::PS_MUL:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rd, insn.ra, insn.rc_reg);
+            emit_ps(*this, "ac", insn, "a0 * c0", "a1 * c1");
             break;
         case PPCInsnType::PS_DIV:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] / ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] / ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.ra, insn.rb);
+            emit_ps(*this, "ab", insn, "a0 / b0", "a1 / b1");
             break;
+        // The fused forms compute the product exactly (24 x 24 bits fit a double) and round once.
         case PPCInsnType::PS_MADD:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][0] + ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][1] + ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "(float)((double)a0 * c0 + b0)", "(float)((double)a1 * c1 + b1)");
             break;
         case PPCInsnType::PS_MSUB:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][0] - ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][1] - ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "(float)((double)a0 * c0 - b0)", "(float)((double)a1 * c1 - b1)");
             break;
         case PPCInsnType::PS_NMADD:
-            emit("ctx->ps[%u][0] = -(ctx->ps[%u][0] * ctx->ps[%u][0] + ctx->ps[%u][0]); ctx->ps[%u][1] = -(ctx->ps[%u][1] * ctx->ps[%u][1] + ctx->ps[%u][1]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "-(float)((double)a0 * c0 + b0)", "-(float)((double)a1 * c1 + b1)");
             break;
         case PPCInsnType::PS_NMSUB:
-            emit("ctx->ps[%u][0] = -(ctx->ps[%u][0] * ctx->ps[%u][0] - ctx->ps[%u][0]); ctx->ps[%u][1] = -(ctx->ps[%u][1] * ctx->ps[%u][1] - ctx->ps[%u][1]);",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "-(float)((double)a0 * c0 - b0)", "-(float)((double)a1 * c1 - b1)");
             break;
         case PPCInsnType::PS_MULS0:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][0];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rd, insn.ra, insn.rc_reg);
+            emit_ps(*this, "ac", insn, "a0 * c0", "a1 * c0");
             break;
         case PPCInsnType::PS_MULS1:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][1]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rd, insn.ra, insn.rc_reg);
+            emit_ps(*this, "ac", insn, "a0 * c1", "a1 * c1");
             break;
         case PPCInsnType::PS_MADDS0:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][0] + ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][0] + ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "(float)((double)a0 * c0 + b0)", "(float)((double)a1 * c0 + b1)");
             break;
         case PPCInsnType::PS_MADDS1:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] * ctx->ps[%u][1] + ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1] * ctx->ps[%u][1] + ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "(float)((double)a0 * c1 + b0)", "(float)((double)a1 * c1 + b1)");
             break;
         case PPCInsnType::PS_SUM0:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0] + ctx->ps[%u][1]; ctx->ps[%u][1] = ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rb, insn.rd, insn.rc_reg);
+            emit_ps(*this, "abc", insn, "a0 + b1", "c1");
             break;
         case PPCInsnType::PS_SUM1:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][0] + ctx->ps[%u][1];",
-                 insn.rd, insn.rc_reg, insn.rd, insn.ra, insn.rb);
+            emit_ps(*this, "abc", insn, "c0", "a0 + b1");
             break;
         case PPCInsnType::PS_MERGE00:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][0];",
-                 insn.rd, insn.ra, insn.rd, insn.rb);
+            emit_ps(*this, "ab", insn, "a0", "b0");
             break;
         case PPCInsnType::PS_MERGE01:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rd, insn.rb);
+            emit_ps(*this, "ab", insn, "a0", "b1");
             break;
         case PPCInsnType::PS_MERGE10:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][1]; ctx->ps[%u][1] = ctx->ps[%u][0];",
-                 insn.rd, insn.ra, insn.rd, insn.rb);
+            emit_ps(*this, "ab", insn, "a1", "b0");
             break;
         case PPCInsnType::PS_MERGE11:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][1]; ctx->ps[%u][1] = ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rd, insn.rb);
+            emit_ps(*this, "ab", insn, "a1", "b1");
             break;
         case PPCInsnType::PS_MR:
-            emit("ctx->ps[%u][0] = ctx->ps[%u][0]; ctx->ps[%u][1] = ctx->ps[%u][1];",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "b0", "b1");
             break;
         case PPCInsnType::PS_NEG:
-            emit("ctx->ps[%u][0] = -ctx->ps[%u][0]; ctx->ps[%u][1] = -ctx->ps[%u][1];",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "-b0", "-b1");
             break;
         case PPCInsnType::PS_ABS:
-            emit("ctx->ps[%u][0] = fabsf(ctx->ps[%u][0]); ctx->ps[%u][1] = fabsf(ctx->ps[%u][1]);",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "fabsf(b0)", "fabsf(b1)");
             break;
         case PPCInsnType::PS_NABS:
-            emit("ctx->ps[%u][0] = -fabsf(ctx->ps[%u][0]); ctx->ps[%u][1] = -fabsf(ctx->ps[%u][1]);",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "-fabsf(b0)", "-fabsf(b1)");
             break;
         case PPCInsnType::PS_RES:
-            emit("ctx->ps[%u][0] = 1.0f / ctx->ps[%u][0]; ctx->ps[%u][1] = 1.0f / ctx->ps[%u][1];",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "1.0f / b0", "1.0f / b1");
             break;
         case PPCInsnType::PS_RSQRTE:
-            emit("ctx->ps[%u][0] = 1.0f / sqrtf(ctx->ps[%u][0]); ctx->ps[%u][1] = 1.0f / sqrtf(ctx->ps[%u][1]);",
-                 insn.rd, insn.rb, insn.rd, insn.rb);
+            emit_ps(*this, "b", insn, "1.0f / sqrtf(b0)", "1.0f / sqrtf(b1)");
             break;
         case PPCInsnType::PS_SEL:
-            emit("ctx->ps[%u][0] = (ctx->ps[%u][0] >= 0.0f) ? ctx->ps[%u][0] : ctx->ps[%u][0]; ctx->ps[%u][1] = (ctx->ps[%u][1] >= 0.0f) ? ctx->ps[%u][1] : ctx->ps[%u][1];",
-                 insn.rd, insn.ra, insn.rc_reg, insn.rb, insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit_ps(*this, "abc", insn, "a0 >= 0.0f ? c0 : b0", "a1 >= 0.0f ? c1 : b1");
             break;
 
         // Paired singles compare
         case PPCInsnType::PS_CMPU0:
-            emit("{ float a = ctx->ps[%u][0]; float b = ctx->ps[%u][0]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
+        case PPCInsnType::PS_CMPO0:
+            emit("{ float a = (float)ctx->f[%u]; float b = (float)ctx->f[%u]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
                  insn.ra, insn.rb, insn.crfd);
             break;
         case PPCInsnType::PS_CMPU1:
-            emit("{ float a = ctx->ps[%u][1]; float b = ctx->ps[%u][1]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
-                 insn.ra, insn.rb, insn.crfd);
-            break;
-        case PPCInsnType::PS_CMPO0:
-            emit("{ float a = ctx->ps[%u][0]; float b = ctx->ps[%u][0]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
-                 insn.ra, insn.rb, insn.crfd);
-            break;
         case PPCInsnType::PS_CMPO1:
-            emit("{ float a = ctx->ps[%u][1]; float b = ctx->ps[%u][1]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
+            emit("{ float a = ctx->ps1[%u]; float b = ctx->ps1[%u]; uint32_t c = (a < b) ? 8 : (a > b) ? 4 : (a == b) ? 2 : 1; ctx->set_cr_field(%u, c); }",
                  insn.ra, insn.rb, insn.crfd);
             break;
 
@@ -832,49 +821,42 @@ namespace gcrecomp {
         // For GQR=0 (most common), quantization type is float and scale is 1.
         // We emit a runtime helper call that reads the GQR register.
         case PPCInsnType::PSQ_L:
-            if (insn.psq_w) {
-                emit("ctx->ps[%u][0] = PSQ_LOAD_ONE(%s + %d, ctx->gqr[%u]); ctx->ps[%u][1] = 1.0f;",
-                     insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0",
-                     insn.simm, insn.psq_i, insn.rd);
-            } else {
-                emit("PSQ_LOAD_PAIR(&ctx->ps[%u][0], &ctx->ps[%u][1], %s + %d, ctx->gqr[%u]);",
-                     insn.rd, insn.rd,
-                     insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0",
-                     insn.simm, insn.psq_i);
-            }
-            break;
         case PPCInsnType::PSQ_LU:
-            emit("ctx->r[%u] += %d;", insn.ra, insn.simm);
-            if (insn.psq_w) {
-                emit("ctx->ps[%u][0] = PSQ_LOAD_ONE(ctx->r[%u], ctx->gqr[%u]); ctx->ps[%u][1] = 1.0f;",
-                     insn.rd, insn.ra, insn.psq_i, insn.rd);
-            } else {
-                emit("PSQ_LOAD_PAIR(&ctx->ps[%u][0], &ctx->ps[%u][1], ctx->r[%u], ctx->gqr[%u]);",
-                     insn.rd, insn.rd, insn.ra, insn.psq_i);
-            }
-            break;
+        case PPCInsnType::PSQ_LX:
+        case PPCInsnType::PSQ_LUX:
         case PPCInsnType::PSQ_ST:
-            if (insn.psq_w) {
-                emit("PSQ_STORE_ONE(ctx->ps[%u][0], %s + %d, ctx->gqr[%u]);",
-                     insn.rs, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0",
-                     insn.simm, insn.psq_i);
-            } else {
-                emit("PSQ_STORE_PAIR(ctx->ps[%u][0], ctx->ps[%u][1], %s + %d, ctx->gqr[%u]);",
-                     insn.rs, insn.rs,
-                     insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0",
-                     insn.simm, insn.psq_i);
-            }
-            break;
         case PPCInsnType::PSQ_STU:
-            emit("ctx->r[%u] += %d;", insn.ra, insn.simm);
-            if (insn.psq_w) {
-                emit("PSQ_STORE_ONE(ctx->ps[%u][0], ctx->r[%u], ctx->gqr[%u]);",
-                     insn.rs, insn.ra, insn.psq_i);
+        case PPCInsnType::PSQ_STX:
+        case PPCInsnType::PSQ_STUX: {
+            const bool indexed = insn.type == PPCInsnType::PSQ_LX || insn.type == PPCInsnType::PSQ_LUX ||
+                                 insn.type == PPCInsnType::PSQ_STX || insn.type == PPCInsnType::PSQ_STUX;
+            const bool update = insn.type == PPCInsnType::PSQ_LU || insn.type == PPCInsnType::PSQ_LUX ||
+                                insn.type == PPCInsnType::PSQ_STU || insn.type == PPCInsnType::PSQ_STUX;
+            const bool store = insn.type == PPCInsnType::PSQ_ST || insn.type == PPCInsnType::PSQ_STU ||
+                               insn.type == PPCInsnType::PSQ_STX || insn.type == PPCInsnType::PSQ_STUX;
+            // Effective address: (rA|0) + d, or (rA|0) + rB; the update forms use rA itself (rA != 0).
+            char ea[96];
+            const std::string base = insn.ra ? "ctx->r[" + std::to_string(insn.ra) + "]" : "0";
+            if (indexed) std::snprintf(ea, sizeof ea, "%s + ctx->r[%u]", base.c_str(), insn.rb);
+            else std::snprintf(ea, sizeof ea, "%s + %d", base.c_str(), insn.simm);
+            const uint32_t reg = store ? insn.rs : insn.rd;
+            // A quantized access moves ps0 and ps1 (W = 0) or only ps0 (W = 1; a load then sets ps1 to 1.0).
+            // ps0 is the register's double, ps1 its second slot.
+            emit("{ uint32_t ea = %s;", ea);
+            if (update) emit("  ctx->r[%u] = ea;", insn.ra);
+            if (store) {
+                if (insn.psq_w) emit("  PSQ_STORE_ONE((float)ctx->f[%u], ea, ctx->gqr[%u]);", reg, insn.psq_i);
+                else emit("  PSQ_STORE_PAIR((float)ctx->f[%u], ctx->ps1[%u], ea, ctx->gqr[%u]);", reg, reg, insn.psq_i);
+            } else if (insn.psq_w) {
+                emit("  float v0 = PSQ_LOAD_ONE(ea, ctx->gqr[%u]); ctx->f[%u] = (double)v0; ctx->ps1[%u] = 1.0f;",
+                     insn.psq_i, reg, reg);
             } else {
-                emit("PSQ_STORE_PAIR(ctx->ps[%u][0], ctx->ps[%u][1], ctx->r[%u], ctx->gqr[%u]);",
-                     insn.rs, insn.rs, insn.ra, insn.psq_i);
+                emit("  float v0, v1; PSQ_LOAD_PAIR(&v0, &v1, ea, ctx->gqr[%u]); ctx->f[%u] = (double)v0; ctx->ps1[%u] = v1;",
+                     insn.psq_i, reg, reg);
             }
+            emit("}");
             break;
+        }
 
         // ==== Condition Register Operations ====
         case PPCInsnType::CRXOR:

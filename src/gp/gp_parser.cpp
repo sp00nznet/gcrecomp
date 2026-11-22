@@ -48,6 +48,7 @@ struct Layout {
     uint32_t col_cnt[2] = {}, col_fmt[2] = {};
     uint32_t tex_cnt[8] = {}, tex_fmt[8] = {}, tex_shift[8] = {};
     uint32_t size = 0;
+    uint32_t fmt = 0;
 };
 
 uint32_t comp_size(uint32_t fmt) {
@@ -80,6 +81,7 @@ uint32_t attr_size(AttrMode m, uint32_t direct_size) {
 
 Layout make_layout(const State& s, uint32_t fmt) {
     Layout l;
+    l.fmt = fmt;
     const uint32_t lo = s.vcd_lo, hi = s.vcd_hi;
     const uint32_t a = s.vat[0][fmt], b = s.vat[1][fmt], c = s.vat[2][fmt];
     l.pmidx = lo & 1;
@@ -444,6 +446,17 @@ private:
         unpack_rgba8(s.xf[0x100D], mat_color[1]);
 
         const uint32_t num_texgens = s.bp[0x00] & 0xF;
+        static const long trace_frame = std::getenv("GP_TRACE_FRAME") ? std::atol(std::getenv("GP_TRACE_FRAME")) : -1;
+        const bool trace = trace_frame >= 0 && uint64_t(trace_frame) == g_frames;
+        static int trace_n = 0;
+        if (trace) {
+            ++trace_n;
+            std::fprintf(stderr,
+                         "[DRAW] #%d prim=%u n=%u vsize=%u vcd=%06X/%04X gen=%06X tev=%u z=%02X blend=%04X acmp=%06X cc0=%06X ca0=%06X tref0=%06X img0=%06X/%06X ntexg=%u proj=%g %g %g %g %g %g o=%u vp=%g %g %g %g\n",
+                         trace_n, unsigned(prim), count, l.size, s.vcd_lo, s.vcd_hi, s.bp[0], ((s.bp[0] >> 10) & 0xF) + 1, s.bp[0x40], s.bp[0x41], s.bp[0xF3],
+                         s.bp[0xC0], s.bp[0xC1], s.bp[0x28], s.bp[0x88], s.bp[0x94], num_texgens, p0, p1, p2, p3, p4, p5, ortho, s.xf_float(0x101A),
+                         s.xf_float(0x101B), s.xf_float(0x101D), s.xf_float(0x101E));
+        }
         const uint8_t* p = data;
         for (uint32_t v = 0; v < count; ++v) {
             float* out = &vertices_[size_t(v) * kVertexFloats];
@@ -532,6 +545,17 @@ private:
             float view_nrm[3];
             transform_normal(s.xf, pos_mtx, nrm, view_nrm);
             light_vertex(s.xf, color, view, view_nrm, lit);
+            if (trace && trace_n <= 60 && v == 0) {
+                std::fprintf(stderr, "[DRAW]   ndc=(%g %g %g) w=%g lit0=(%g %g %g %g) nrm=(%g %g %g) view_nrm=(%g %g %g) ctrl0=%X ctrl1=%X amb0=%08X mat0=%08X L0col=%08X L1col=%08X L0pos=(%g %g %g) L0dir=(%g %g %g) vcol=(%g %g %g %g)\n",
+                             cx / cw, cy / cw, zgc, cw, lit[0][0], lit[0][1], lit[0][2], lit[0][3], nrm[0], nrm[1], nrm[2], view_nrm[0], view_nrm[1], view_nrm[2], s.xf[0x100E], s.xf[0x1010],
+                             s.xf[0x100A], s.xf[0x100C], s.xf[0x603 + 0], s.xf[0x603 + 16], s.xf_float(0x60A), s.xf_float(0x60B), s.xf_float(0x60C),
+                             s.xf_float(0x60D), s.xf_float(0x60E), s.xf_float(0x60F), color[0][0], color[0][1], color[0][2], color[0][3]);
+            }
+            if (trace && trace_n <= 3 && v < 4) {
+                std::fprintf(stderr, "[DRAW]   v%u mtx=%u pos=(%g %g %g) view=(%g %g %g) clip=(%g %g %g %g) rows:", v, pos_mtx, pos[0], pos[1], pos[2], view[0], view[1], view[2], cx, cy, cz, cw);
+                for (int r = 0; r < 12; ++r) std::fprintf(stderr, " %g", s.xf_float(m + r));
+                std::fprintf(stderr, "\n");
+            }
             out[0] = cx;
             out[1] = cy;
             out[2] = (2.0f * depth - 1.0f) * cw;
@@ -563,7 +587,18 @@ private:
                 uv[0] = res[0];
                 uv[1] = res[1];
                 uv[2] = projective ? res[2] : 1.0f;
+                if (trace && trace_n <= 40 && v < 3 && i == 0)
+                    std::fprintf(stderr, "[DRAW]   uv0 v%u=(%g %g %g) texgen0=%05X mtx=%u rows %g %g %g %g / %g %g %g %g\n", v, uv[0], uv[1], uv[2], info,
+                                 tex_mtx[0], s.xf_float(tm), s.xf_float(tm + 1), s.xf_float(tm + 2), s.xf_float(tm + 3), s.xf_float(tm + 4),
+                                 s.xf_float(tm + 5), s.xf_float(tm + 6), s.xf_float(tm + 7));
             }
+        }
+        // GP_TRACE_DRAWS=first-last: in the traced frame, only draws numbered first..last (as printed) are rendered, to see
+        // what a group of draws contributes.
+        if (trace) {
+            static unsigned lo = 0, hi = ~0u;
+            static const bool have_range = std::getenv("GP_TRACE_DRAWS") && std::sscanf(std::getenv("GP_TRACE_DRAWS"), "%u-%u", &lo, &hi) == 2;
+            if (have_range && (unsigned(trace_n) < lo || unsigned(trace_n) > hi)) return;
         }
         DrawCall call{prim, count, vertices_.data()};
         renderer::draw(call, g_state);
