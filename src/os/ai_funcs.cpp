@@ -10,7 +10,9 @@
 // Interrupts do not preempt recompiled code here, so the callback runs at the points where the
 // game could have been interrupted: when it re-enables interrupts, waits for a retrace or reads
 // the clock (see ai_poll). GCRECOMP_AUDIO=null selects the null sink,
-// GCRECOMP_DUMP_AUDIO=file.wav dumps the output to a WAV file.
+// GCRECOMP_DUMP_AUDIO=file.wav dumps the output to a WAV file. GCRECOMP_AUDIO_TRACE=1 prints, once a
+// second, how the game feeds the DMA: blocks started (and how many were all zero), underruns (the sink
+// ran dry), the longest gap between two polls and the DMA block size and rate.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +44,7 @@ struct AiState {
     Memory* mem = nullptr;
     std::chrono::steady_clock::time_point last_poll{};
     bool in_poll = false;  // the DMA callback is running
+    uint64_t reported_stalls = 0;
 };
 
 AiState g_ai;
@@ -58,6 +61,24 @@ void run_callback() {
 const uint8_t* read_guest(Memory* mem, uint32_t address, uint32_t bytes) {
     if (address > mem->ram_size || bytes > mem->ram_size - address) return nullptr;
     return mem->translate(Memory::MAIN_RAM_BASE | address);
+}
+
+void trace_stats(std::chrono::steady_clock::time_point now) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("GCRECOMP_AUDIO_TRACE");
+        return v && *v && std::strcmp(v, "0") != 0;
+    }();
+    static auto last = now;
+    if (!enabled || now - last < std::chrono::seconds(1)) return;
+    last = now;
+    const auto& st = g_ai.ai->stats();
+    std::fprintf(stderr,
+                 "[AI] blocks %llu (silent %llu) frames %llu underruns %llu stalls %llu polls %llu max poll gap %.1f ms "
+                 "block %u bytes %u Hz queued %zu\n",
+                 (unsigned long long)st.blocks, (unsigned long long)st.silent_blocks, (unsigned long long)st.frames,
+                 (unsigned long long)st.underruns, (unsigned long long)st.stalls, (unsigned long long)st.polls, st.max_poll_gap_ms,
+                 g_ai.ai->dma_length(), audio::ai_sample_rate_hz(g_ai.ai->sample_rate_id()), g_ai.sink->queued_frames());
+    g_ai.ai->reset_max_gap();
 }
 
 void ensure_ai(Memory* mem) {
@@ -209,6 +230,12 @@ void ai_poll(PPCContext* ctx, Memory* mem) {
     g_ai.in_poll = true;
     g_ai.ai->poll();
     g_ai.in_poll = false;
+    const uint64_t stalls = g_ai.ai->stats().stalls;
+    if (stalls != g_ai.reported_stalls) {
+        g_ai.reported_stalls = stalls;
+        std::fprintf(stderr, "[AI] the audio device stopped consuming samples: the DMA runs on the host clock, audio is discarded until it drains\n");
+    }
+    trace_stats(now);
     g_ai.ctx = nullptr;
 }
 

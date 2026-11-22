@@ -48,6 +48,24 @@ public:
     /// The command list rendered last (words, as the CPU wrote them), for traces.
     const uint16_t* last_cmdlist() const { return cmdlist_; }
     size_t last_cmdlist_size() const { return cmd_size_; }
+    /// What the lists contained, for judging what the game asks of the DSP (GCRECOMP_AX_TRACE prints it).
+    struct Stats {
+        uint64_t commands[32] = {};   ///< times each command id 0..31 was met
+        uint64_t voice_ms = 0;        ///< 1 ms slices of running voices processed
+        uint64_t voice_ms_loud = 0;   ///< of those, slices whose resampled output was not all zero
+        int voice_peak = 0;           ///< largest |sample| a voice produced, after the voice envelope
+        /// Sum of squares and sample count at points of the mix, to see which stage a signal dies at.
+        enum Tap { kUploadL, kUploadR, kUploadS, kOppositeIn, kOutL, kOutR, kOutS, kTaps };
+        double tap_energy[kTaps] = {};
+        uint64_t tap_samples[kTaps] = {};
+    };
+    const Stats& stats() const { return stats_; }
+    /// Zeroes the tap accumulators (for windowed measurements).
+    void reset_taps() { for (int i = 0; i < Stats::kTaps; ++i) stats_.tap_energy[i] = 0, stats_.tap_samples[i] = 0; }
+    /// Called with a parameter block (122 words, as the CPU sees it) the first time a running voice at
+    /// that address is processed in a list; for traces. Not called when null.
+    using VoiceObserver = void (*)(uint32_t pb_addr, const uint16_t* pb);
+    void set_voice_observer(VoiceObserver f) { voice_observer_ = f; }
     /// The CPU asked the microcode to hand the DSP back to the ROM.
     bool reset_requested() const { return reset_requested_; }
 
@@ -56,6 +74,7 @@ private:
     static constexpr size_t kPbWords = 122;
     using Pb = uint16_t[kPbWords];
 
+    void tap(int which, const int32_t* samples);
     void copy_cmdlist(uint32_t addr, size_t size, const AxMemory& mem);
     void run_cmdlist(AxMemory& mem);
     void setup(uint32_t init_addr, const AxMemory& mem);
@@ -80,6 +99,9 @@ private:
     /// Mails left to swallow while the CPU uploads a new microcode.
     uint32_t upload_mails_ = 0;
     uint64_t frames_ = 0;
+    Stats stats_;
+    VoiceObserver voice_observer_ = nullptr;
+    uint32_t cur_pb_addr_ = 0;
     uint64_t unknown_cmds_ = 0;
     bool reset_requested_ = false;
 };

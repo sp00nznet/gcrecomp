@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Unit tests for the audio path: sample conversion, DSP ADPCM decoding and the AI DMA model.
 // No display, no disc, no audio device.
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "gcrecomp/audio/audio.h"
@@ -267,6 +269,62 @@ static void test_sample_rate_change() {
     CHECK(h.sink.sample_rate() == 48000);
 }
 
+static void test_stats_count_blocks_silence_and_underruns() {
+    Harness h;
+    h.fill(0x1000, 160, 7);
+    h.ai.init_dma(0x1000, 640);
+    h.ai.start_dma();
+    CHECK(h.ai.poll() == 4);
+    CHECK(h.ai.stats().blocks == 4 && h.ai.stats().frames == 640);
+    CHECK(h.ai.stats().silent_blocks == 0);
+    CHECK(h.ai.stats().underruns == 0);
+    // the game points the DMA at a zero block: counted as silent
+    h.ai.init_dma(0x2000, 640);
+    h.sink.consume(h.sink.queued_frames());  // the sink ran dry: an underrun at the next poll
+    h.ai.poll();
+    CHECK(h.ai.stats().underruns == 1);
+    CHECK(h.ai.stats().silent_blocks == 4);
+    CHECK(h.ai.stats().polls == 2);
+}
+
+static void test_stuck_sink_does_not_stop_the_dma() {
+    // A device that stops consuming (suspended, lost) must not freeze the game: after the stall time the DMA
+    // keeps its real-time pace on the host clock (blocks consumed, interrupts raised, audio discarded).
+    Harness h;
+    h.fill(0x1000, 160, 7);
+    h.ai.init_dma(0x1000, 640);
+    auto fake_now = std::chrono::steady_clock::time_point{} + std::chrono::seconds(1000);
+    h.ai.set_clock([&] { return fake_now; });
+    h.ai.set_stall_ms(30);
+    h.ai.start_dma();
+    CHECK(h.ai.poll() == 4);  // the lead is full and the sink never consumes
+    CHECK(h.ai.poll() == 0);
+    CHECK(!h.ai.stalled());
+    fake_now += std::chrono::milliseconds(40);
+    h.ai.poll();
+    CHECK(h.ai.stalled());
+    CHECK(h.ai.stats().stalls == 1);
+    const uint64_t blocks = h.ai.stats().blocks;
+    const size_t recorded = h.sink.recorded().size();
+    // 100 ms of host time later the DMA has gone on by about that much (20 ms lead: it refills 20 ms per poll)
+    unsigned started = 0;
+    for (int i = 0; i < 10; ++i) {
+        fake_now += std::chrono::milliseconds(10);
+        started += h.ai.poll();
+    }
+    CHECK(started == 20);  // 100 ms of simulated time = 20 blocks of 5 ms
+    CHECK(h.ai.stats().blocks == blocks + started);
+    CHECK(h.sink.recorded().size() == recorded);  // nothing went to the stuck sink
+    CHECK(h.ai.stats().stalled_frames >= uint64_t(started) * 160);
+    // the sink drains again: normal operation resumes
+    h.sink.consume(h.sink.queued_frames() / 2);
+    h.ai.poll();
+    CHECK(!h.ai.stalled());
+    h.sink.consume(160);
+    h.ai.poll();
+    CHECK(h.sink.recorded().size() > recorded);
+}
+
 int main() {
     test_convert_ai_frames();
     test_sample_rate_ids();
@@ -282,6 +340,8 @@ int main() {
     test_poll_is_not_reentrant();
     test_zero_length_and_unreadable_blocks();
     test_sample_rate_change();
+    test_stats_count_blocks_silence_and_underruns();
+    test_stuck_sink_does_not_stop_the_dma();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);
         return 1;

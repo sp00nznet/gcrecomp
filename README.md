@@ -252,7 +252,7 @@ GameCube audio uses a custom DSP with ADPCM compression:
   game registered with `__OSSetInterruptHandler` (replaced: `__OSSetInterruptHandler` must be
   named in the symbol map; so must `OSDisableInterrupts`/`OSEnableInterrupts`, otherwise the
   recompiled `mfmsr`/`mtmsr` no-ops leave the guest's interrupt state wrong), at the OS safe
-  points and every 256K memory operations. `DSP_TRACE=1` logs mails, control writes and every 500th AX command list on stderr.
+  points and every 256K memory operations. `DSP_TRACE=1` logs mails, control writes and every 500th AX command list on stderr. Audio switches and tools: docs/DEBUGGING.md (Audio).
 
 ### Input (`src/input/`)
 

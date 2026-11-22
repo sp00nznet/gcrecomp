@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 
@@ -365,6 +366,7 @@ void AxUcode::run_cmdlist(AxMemory& mem) {
     };
     while (idx < std::size(cmdlist_)) {
         const uint16_t cmd = cmdlist_[idx++];
+        if (cmd < 32) ++stats_.commands[cmd];
         switch (cmd) {
         case 0x00: setup(addr(), mem); break;
         case 0x01: {
@@ -460,6 +462,7 @@ void AxUcode::process_pb_list(uint32_t pb_addr, AxMemory& mem) {
     for (int guard = 0; pb_addr != 0 && guard < 256; ++guard) {
         PbWords pb;
         for (size_t i = 0; i < kPbWords; ++i) pb[i] = r16(mem, pb_addr + 2 * uint32_t(i));
+        cur_pb_addr_ = pb_addr;
         // per-millisecond parameter updates
         uint16_t updates[32][2];
         const uint32_t ua = hilo(pb[39], pb[40]);
@@ -488,6 +491,7 @@ void AxUcode::process_pb_list(uint32_t pb_addr, AxMemory& mem) {
 void AxUcode::process_voice(Pb pb, size_t ms, const AxMemory& mem) {
     constexpr size_t kCount = 32;
     if (pb[7] != 1) return;
+    if (ms == 0 && voice_observer_) voice_observer_(cur_pb_addr_, pb);
     int16_t samples[kCount];
     Accel acc{hilo(pb[57], pb[58]) & 0x3FFFFFFF,
               hilo(pb[59], pb[60]) & 0x3FFFFFFF,
@@ -516,11 +520,16 @@ void AxUcode::process_voice(Pb pb, size_t ms, const AxMemory& mem) {
     pb[80] = acc.pred_scale;
 
     // volume envelope
+    ++stats_.voice_ms;
+    bool loud = false;
     for (int16_t& s : samples) {
         const int64_t v = (int32_t(s) * int32_t(int16_t(pb[50]))) >> 15;
         s = clamp16(v);
         pb[50] = uint16_t(pb[50] + pb[51]);
+        if (s != 0) loud = true;
+        if (std::abs(int(s)) > stats_.voice_peak) stats_.voice_peak = std::abs(int(s));
     }
+    if (loud) ++stats_.voice_ms_loud;
     if (pb[93] != 0) {
         // low-pass filter
         const int32_t a0 = pb[95];
@@ -569,7 +578,15 @@ void AxUcode::mix_aux(size_t aux_id, uint32_t write_addr, uint32_t read_addr, Ax
         }
 }
 
+void AxUcode::tap(int which, const int32_t* samples) {
+    double e = 0;
+    for (size_t k = 0; k < kFrame; ++k) e += double(samples[k]) * double(samples[k]);
+    stats_.tap_energy[which] += e;
+    stats_.tap_samples[which] += kFrame;
+}
+
 void AxUcode::upload_lrs(uint32_t dst, AxMemory& mem) {
+    for (int ch = 0; ch < 3; ++ch) tap(Stats::kUploadL + ch, bufs_[kMainL + ch]);
     for (size_t ch = 0; ch < 3; ++ch)
         for (size_t k = 0; k < kFrame; ++k) {
             w32(mem, dst, uint32_t(bufs_[kMainL + ch][k]));
@@ -587,6 +604,11 @@ void AxUcode::set_main_lr(uint32_t src, const AxMemory& mem) {
 }
 
 void AxUcode::set_opposite_lr(uint32_t src, const AxMemory& mem) {
+    {
+        int32_t in[kFrame];
+        for (size_t k = 0; k < kFrame; ++k) in[k] = int32_t(r32(mem, src + 4 * uint32_t(k)));
+        tap(Stats::kOppositeIn, in);
+    }
     for (size_t k = 0; k < kFrame; ++k) {
         const int32_t s = int32_t(r32(mem, src + 4 * uint32_t(k)));
         bufs_[kMainL][k] = int32_t(0u - uint32_t(s));
@@ -622,6 +644,7 @@ void AxUcode::compressor(uint16_t threshold, uint16_t release_frames, uint32_t t
 }
 
 void AxUcode::output(uint32_t lr, uint32_t surround, AxMemory& mem) {
+    for (int ch = 0; ch < 3; ++ch) tap(Stats::kOutL + ch, bufs_[kMainL + ch]);
     for (size_t k = 0; k < kFrame; ++k) w32(mem, surround + 4 * uint32_t(k), uint32_t(bufs_[kMainS][k]));
     for (size_t k = 0; k < kFrame; ++k) {
         const int16_t l = clamp16(bufs_[kMainL][k]);

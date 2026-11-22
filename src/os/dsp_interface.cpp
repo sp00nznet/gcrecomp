@@ -5,10 +5,13 @@
 // the SDK's dolphin/dsp.h.
 #include "gcrecomp/hw/dsp.h"
 
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <unordered_set>
 
 #include "gcrecomp/interrupts.h"
 #include "gcrecomp/runtime.h"
@@ -46,6 +49,49 @@ bool env_flag(const char* name) {
 }  // namespace
 
 DspInterface g_dsp;
+
+namespace {
+
+// GCRECOMP_AX_TRACE=1: the first running voices (parameter block address, source format and addresses,
+// resampling ratio, mixer control) and, once a second, what the command lists contained.
+bool ax_trace_enabled() {
+    static const bool on = env_flag("GCRECOMP_AX_TRACE");
+    return on;
+}
+
+void trace_voice(uint32_t pb_addr, const uint16_t* pb) {
+    static std::unordered_set<uint32_t> seen;
+    if (seen.size() >= 64 || !seen.insert(pb_addr).second) return;
+    auto hilo = [&](int i) { return uint32_t(pb[i]) << 16 | pb[i + 1]; };
+    std::fprintf(stderr,
+                 "[AX] voice pb %08X: format %04X (srctype %u) start %08X end %08X cur %08X ratio %08X mixctl %04X "
+                 "loop %u vol %04X\n",
+                 pb_addr, pb[56], pb[4], hilo(57), hilo(59), hilo(61), hilo(83), pb[6], pb[55], pb[50]);
+}
+
+void trace_ax_stats(audio::AxUcode& ax) {
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(1)) return;
+    last = now;
+    const auto& st = ax.stats();
+    std::fprintf(stderr, "[AX] lists %llu, voice ms %llu (loud %llu, peak %d), unknown cmds %llu, commands:",
+                 (unsigned long long)ax.frames(), (unsigned long long)st.voice_ms, (unsigned long long)st.voice_ms_loud,
+                 st.voice_peak, (unsigned long long)ax.unknown_commands());
+    for (unsigned i = 0; i < 32; ++i)
+        if (st.commands[i]) std::fprintf(stderr, " %02X:%llu", i, (unsigned long long)st.commands[i]);
+    std::fprintf(stderr, "\n");
+    static const char* const kTapNames[] = {"uploadL", "uploadR", "uploadS", "oppositeIn", "outL", "outR", "outS"};
+    std::fprintf(stderr, "[AX] rms per stage (last second):");
+    for (int i = 0; i < audio::AxUcode::Stats::kTaps; ++i) {
+        const double n = double(st.tap_samples[i]);
+        std::fprintf(stderr, " %s %.0f", kTapNames[i], n > 0 ? std::sqrt(st.tap_energy[i] / n) : 0.0);
+    }
+    std::fprintf(stderr, "\n");
+    ax.reset_taps();
+}
+
+}  // namespace
 
 DspInterface::DspInterface() : aram_(kAramSize, 0) { trace_ = env_flag("DSP_TRACE"); }
 
@@ -203,7 +249,9 @@ void DspInterface::axucode_mail(uint32_t mail, uint8_t* ram, size_t ram_size) {
     mem.ram_size = ram ? ram_size : 0;
     mem.aram = aram_.data();
     mem.aram_size = aram_.size();
+    if (ax_trace_enabled()) ax_.set_voice_observer(trace_voice);
     const std::optional<uint32_t> reply = ax_.handle_mail(mail, mem);
+    if (ax_trace_enabled()) trace_ax_stats(ax_);
     if (reply) {
         post_mail_to_cpu(*reply);
         control_ |= CR_DSPINT;

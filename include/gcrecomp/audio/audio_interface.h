@@ -9,6 +9,7 @@
 // through a callback, converts them, feeds an AudioSink and raises the interrupt through another
 // callback. The binding to the recompiled SDK is src/os/ai_funcs.cpp.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -60,6 +61,29 @@ public:
 
     uint64_t blocks_started() const { return blocks_; }
 
+    /// Counters for judging whether the game feeds the DMA in time (GCRECOMP_AUDIO_TRACE prints them).
+    struct Stats {
+        uint64_t polls = 0;           ///< calls to poll() that ran (DMA enabled)
+        uint64_t blocks = 0;          ///< blocks started
+        uint64_t silent_blocks = 0;   ///< blocks that were all zero
+        uint64_t underruns = 0;       ///< polls that found the sink empty after having played something
+        uint64_t frames = 0;          ///< frames submitted
+        double max_poll_gap_ms = 0;   ///< longest time between two polls
+        uint64_t stalls = 0;          ///< times the sink stopped consuming and the DMA fell back to the host clock
+        uint64_t stalled_frames = 0;  ///< frames consumed on the host clock instead of by the sink
+    };
+    const Stats& stats() const { return stats_; }
+    /// The sink has stopped consuming (a stuck or suspended device): the DMA keeps its real-time pace on the
+    /// host clock, the game keeps running, and the audio is discarded until the sink drains again.
+    bool stalled() const { return stalled_; }
+    /// How long a full sink may go without draining before it counts as stalled. Default 250 ms.
+    void set_stall_ms(uint32_t ms) { stall_ms_ = ms; }
+    /// Time source for the stall detection and the host-clock fallback (default: steady_clock); tests inject a simulated one.
+    using ClockFn = std::function<std::chrono::steady_clock::time_point()>;
+    void set_clock(ClockFn clock) { clock_ = std::move(clock); }
+    /// Resets the maximum-gap counter (the others only grow).
+    void reset_max_gap() { stats_.max_poll_gap_ms = 0; }
+
 private:
     AudioSink& sink_;
     ReadMemoryFn read_memory_;
@@ -71,6 +95,14 @@ private:
     bool enabled_ = false;
     bool in_poll_ = false;
     uint64_t blocks_ = 0;
+    Stats stats_;
+    ClockFn clock_ = [] { return std::chrono::steady_clock::now(); };
+    uint32_t stall_ms_ = 250;
+    bool stalled_ = false;
+    size_t last_queued_ = 0;
+    double virtual_queue_ = 0;  // frames "queued" while stalled (host-clock model of the sink)
+    std::chrono::steady_clock::time_point progress_since_{};
+    std::chrono::steady_clock::time_point last_poll_{};
     std::vector<int16_t> scratch_;
 };
 

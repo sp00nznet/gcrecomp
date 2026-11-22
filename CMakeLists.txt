@@ -226,6 +226,9 @@ if(GCRECOMP_BUILD_TESTS AND GCRECOMP_BUILD_RUNTIME)
     add_executable(gcrecomp_ax_tests tests/ax_tests.cpp)
     target_link_libraries(gcrecomp_ax_tests PRIVATE gcrecomp_audio)
     add_test(NAME ax COMMAND gcrecomp_ax_tests)
+    # Manual probe of the host audio sink (not run by ctest): see tools/audio_probe/main.cpp.
+    add_executable(gcrecomp_audio_probe tools/audio_probe/main.cpp)
+    target_link_libraries(gcrecomp_audio_probe PRIVATE gcrecomp_audio)
 endif()
 
 # ===========================================================================

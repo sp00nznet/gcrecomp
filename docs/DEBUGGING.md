@@ -43,3 +43,35 @@ one representation: `f[i]` is ps0 and `ps1[i]` is ps1; every scalar FP instructi
 `psq_l` / `psq_st` goes through those two, and `tests/ps_semantics_test.cpp` runs the emitted code of a set of
 instructions against hand-computed results (including a destination register that is also a source, and the
 quantised load/store with saturation and signed scales).
+
+## Audio
+
+Where the sound goes: the SDK's AI functions are replaced (`src/os/ai_funcs.cpp`); the game's PCM blocks reach an
+`AudioSink` (SDL3 by default, `GCRECOMP_AUDIO=null` for none). Some scenes mix on the DSP (the AX microcode, lists
+of commands in `src/audio/ax_hle.cpp`), others do not: Tales of Symphonia's intro movie (`mov/op.h4m`) stops the AX
+lists and feeds the AI DMA itself, the title music is mixed by game code and handed to AX as aux buffers.
+
+Environment switches:
+
+| Variable | Effect |
+| --- | --- |
+| `GCRECOMP_DUMP_AUDIO=file.wav` | Everything played, as a 16-bit stereo WAV (valid after every block). |
+| `GCRECOMP_AUDIO_TRACE=1` | Once a second: DMA blocks started, all-zero blocks, underruns, sink stalls, longest gap between polls, block size, rate, sink queue. |
+| `GCRECOMP_AX_TRACE=1` | The first running AX voices (parameter block, format, addresses, ratio) and, once a second, the command histogram, voice slices and the RMS at stages of the mix (upload L/R/S, surround buffer in, output L/R/S): shows at which stage a channel dies. |
+| `DSP_TRACE=1` | DSP mails, control writes, every 500th AX list. |
+
+A sink that holds a full lead and does not drain for 250 ms (device suspended or lost) is detected: the DMA then keeps
+its real-time pace on the host clock and discards the audio, so the game does not freeze (`[AI] the audio device
+stopped consuming`).
+
+Tools:
+
+* `tools/wav-compare.py A.wav [B.wav] [--align] [--a-from/--a-to/--b-from/--b-to S]`: non-zero ratio, RMS and peak per
+  second, energy per band, and for two files envelope correlation, band-share distance and the time offset. Works on our
+  dump and on Dolphin's `Dump/Audio/*dspdump.wav`; `--require-nonzero` makes it a check.
+* `tools/dolphin-run.sh --iso game.iso --user DIR --dump-audio -- wait:20 press:A ...`: Dolphin reference run with
+  scripted input (ported from fepor-recomp).
+* `tools/audio-capture.sh --out cap.wav -- program args...`: records what the program really sends to the host audio
+  server (its streams are moved to a temporary null sink and the sink's monitor is recorded), to test the default SDL
+  sink end to end without listening. `build/gcrecomp_audio_probe --seconds 4` plays a tone through the same sink;
+  `tools/audio-capture.sh --out c.wav -- build/gcrecomp_audio_probe` then `tools/wav-compare.py c.wav --require-nonzero`.
