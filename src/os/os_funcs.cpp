@@ -30,6 +30,7 @@
 #include "gcrecomp/runtime.h"
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -593,6 +594,39 @@ struct DVDFileEntry {
 static std::string g_game_root;  // Root directory of extracted game files
 static std::unordered_map<uint32_t, FILE*> g_open_dvd_files;  // fileinfo addr -> FILE*
 
+// The disc's file system is case-insensitive; the host's usually is not (the game asks for "s/se.snd"
+// where the extracted disc has "S/se.snd"). Returns `path` below `root` with each component matched
+// ignoring case, or an empty string when there is no such file.
+static std::string resolve_disc_path(const std::string& root, const std::string& path) {
+    namespace fs = std::filesystem;
+    fs::path current = root;
+    size_t pos = 0;
+    while (pos < path.size()) {
+        size_t end = path.find_first_of("/\\", pos);
+        if (end == std::string::npos) end = path.size();
+        const std::string part = path.substr(pos, end - pos);
+        pos = end + 1;
+        if (part.empty() || part == ".") continue;
+        std::error_code ec;
+        if (fs::exists(current / part, ec)) {
+            current /= part;
+            continue;
+        }
+        bool found = false;
+        for (const auto& entry : fs::directory_iterator(current, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (name.size() == part.size() &&
+                std::equal(name.begin(), name.end(), part.begin(), [](char a, char b) { return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); })) {
+                current /= name;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return {};
+    }
+    return current.string();
+}
+
 // DVDOpen(const char* path, DVDFileInfo* info) -> BOOL
 static void dvd_open(PPCContext* ctx, Memory* mem) {
     uint32_t path_addr = ctx->r[3];
@@ -615,6 +649,10 @@ static void dvd_open(PPCContext* ctx, Memory* mem) {
     }
 
     FILE* fp = fopen(host_path.c_str(), "rb");
+    if (!fp) {
+        const std::string resolved = resolve_disc_path(g_game_root, path);
+        if (!resolved.empty()) fp = fopen(resolved.c_str(), "rb");
+    }
     if (fp) {
         fseek(fp, 0, SEEK_END);
         uint32_t file_size = (uint32_t)ftell(fp);
