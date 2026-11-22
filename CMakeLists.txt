@@ -44,6 +44,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/rarc.cpp
         src/os/ar_funcs.cpp
         src/os/dvd_funcs.cpp
+        src/os/gx_funcs.cpp
         src/os/rel.cpp
     )
     target_include_directories(gcrecomp_runtime PUBLIC include)
@@ -84,6 +85,27 @@ if(GCRECOMP_BUILD_RUNTIME)
     target_include_directories(gcrecomp_input PUBLIC include)
     if(WIN32)
         target_link_libraries(gcrecomp_input PRIVATE xinput)
+    endif()
+
+    # GP: consumes the GX command stream written by the recompiled SDK and draws it with OpenGL
+    # through SDL3 (Linux). Requires SDL3 and OpenGL development files.
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SDL3 QUIET sdl3)
+    endif()
+    if(SDL3_FOUND)
+        find_package(OpenGL QUIET)
+        add_library(gcrecomp_gp STATIC
+            src/gp/gp.cpp
+            src/gp/gl_renderer.cpp
+        )
+        target_include_directories(gcrecomp_gp PUBLIC include)
+        target_include_directories(gcrecomp_gp PRIVATE ${SDL3_INCLUDE_DIRS})
+        # The texture decoders live in gcrecomp_gx.
+        target_link_libraries(gcrecomp_gp PUBLIC gcrecomp_gx ${SDL3_LINK_LIBRARIES} GL)
+        target_link_directories(gcrecomp_gp PUBLIC ${SDL3_LIBRARY_DIRS})
+    else()
+        message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")
     endif()
 endif()
 

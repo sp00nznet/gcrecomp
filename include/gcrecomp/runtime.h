@@ -304,6 +304,14 @@ uint64_t last_dispatch(uint32_t* addr, uint32_t* lr);
 // =============================================================================
 extern PPCContext g_ctx;
 extern Memory     g_mem;
+
+// Sink for stores to the write-gather pipe (0xCC008000), where the SDK's GX code writes its command
+// stream. Installed by the GP module; stores are absorbed by the hardware register space otherwise.
+// `size` is 1, 2, 4 or 8 bytes and `value` holds them big-endian.
+extern void (*g_wgp_write)(uint32_t size, uint64_t value);
+
+// Called once per VIWaitForRetrace, on the game's thread (window events are pumped here).
+extern void (*g_retrace_hook)();
 extern FuncTable  g_func_table;
 
 // =============================================================================

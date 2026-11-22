@@ -359,11 +359,23 @@ static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
 }
 
 // Big-endian writes
+void (*g_wgp_write)(uint32_t size, uint64_t value) = nullptr;
+
+static constexpr uint32_t kWgpAddr = 0xCC008000;
+
 void Memory::write8(uint32_t addr, uint8_t val) {
+    if (addr == kWgpAddr && g_wgp_write) {
+        g_wgp_write(1, val);
+        return;
+    }
     *translate(addr) = val;
 }
 
 void Memory::write16(uint32_t addr, uint16_t val) {
+    if (addr == kWgpAddr && g_wgp_write) {
+        g_wgp_write(2, val);
+        return;
+    }
     if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
         hw_write16_hle(this, addr, val);
         return;
@@ -374,6 +386,10 @@ void Memory::write16(uint32_t addr, uint16_t val) {
 }
 
 void Memory::write32(uint32_t addr, uint32_t val) {
+    if (addr == kWgpAddr && g_wgp_write) {
+        g_wgp_write(4, val);
+        return;
+    }
     // Intercept HW register writes for HLE
     if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
         hw_write32_hle(this, addr, val);
@@ -387,6 +403,10 @@ void Memory::write32(uint32_t addr, uint32_t val) {
 }
 
 void Memory::write64(uint32_t addr, uint64_t val) {
+    if (addr == kWgpAddr && g_wgp_write) {
+        g_wgp_write(8, val);
+        return;
+    }
     write32(addr, (uint32_t)(val >> 32));
     write32(addr + 4, (uint32_t)val);
 }

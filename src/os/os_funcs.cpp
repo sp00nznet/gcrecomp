@@ -1002,8 +1002,11 @@ static void vi_set_black(PPCContext* ctx, Memory* mem) {
 
 // VIWaitForRetrace: sleep ~16.67ms to simulate 60Hz VBlank.
 // Without this the game loop runs at infinite speed and hangs.
+void (*g_retrace_hook)() = nullptr;
+
 static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
     g_vi_retrace_count++;
+    if (g_retrace_hook) g_retrace_hook();
     std::this_thread::sleep_for(std::chrono::microseconds(16667));
 }
 
@@ -1542,6 +1545,7 @@ void register_os_functions() {
 
 RecompiledFunc lookup_ar_func(const char* name);   // src/os/ar_funcs.cpp
 RecompiledFunc lookup_dvd_func(const char* name);  // src/os/dvd_funcs.cpp
+RecompiledFunc lookup_gx_func(const char* name);   // src/os/gx_funcs.cpp
 
 // Lookup OS function by name (called during symbol map loading)
 RecompiledFunc lookup_os_func(const char* name) {
@@ -1551,7 +1555,8 @@ RecompiledFunc lookup_os_func(const char* name) {
         }
     }
     if (RecompiledFunc f = lookup_ar_func(name)) return f;
-    return lookup_dvd_func(name);
+    if (RecompiledFunc f = lookup_dvd_func(name)) return f;
+    return lookup_gx_func(name);
 }
 
 // Set the root directory for game file access (DVD HLE)

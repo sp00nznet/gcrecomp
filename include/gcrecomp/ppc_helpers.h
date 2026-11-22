@@ -142,16 +142,20 @@ inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint3
     }
 }
 
+// A store to the write-gather pipe (0xCC008000) feeds the same FIFO address, so the second element
+// of a paired store goes to the same address rather than the next one.
+inline uint32_t psq_next_addr(uint32_t addr, uint32_t step) { return addr == 0xCC008000u ? addr : addr + step; }
+
 inline void psq_store_pair(gcrecomp::Memory& mem, float v0, float v1, uint32_t addr, uint32_t gqr) {
     uint32_t type  = (gqr >> 16) & 0x7;
     uint32_t scale = (gqr >> 24) & 0x3F;
     float mul = static_cast<float>(1u << scale);
     switch (type) {
-        case PSQ_TYPE_FLOAT: { uint32_t r0,r1; memcpy(&r0,&v0,4); memcpy(&r1,&v1,4); mem.write32(addr,r0); mem.write32(addr+4,r1); break; }
-        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(v0*mul)); mem.write8(addr+1, static_cast<uint8_t>(v1*mul)); break;
-        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(v0*mul))); mem.write8(addr+1, static_cast<uint8_t>(static_cast<int8_t>(v1*mul))); break;
-        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(v0*mul)); mem.write16(addr+2, static_cast<uint16_t>(v1*mul)); break;
-        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(v0*mul))); mem.write16(addr+2, static_cast<uint16_t>(static_cast<int16_t>(v1*mul))); break;
+        case PSQ_TYPE_FLOAT: { uint32_t r0,r1; memcpy(&r0,&v0,4); memcpy(&r1,&v1,4); mem.write32(addr,r0); mem.write32(psq_next_addr(addr, 4),r1); break; }
+        case PSQ_TYPE_U8:  mem.write8(addr, static_cast<uint8_t>(v0*mul)); mem.write8(psq_next_addr(addr, 1), static_cast<uint8_t>(v1*mul)); break;
+        case PSQ_TYPE_S8:  mem.write8(addr, static_cast<uint8_t>(static_cast<int8_t>(v0*mul))); mem.write8(psq_next_addr(addr, 1), static_cast<uint8_t>(static_cast<int8_t>(v1*mul))); break;
+        case PSQ_TYPE_U16: mem.write16(addr, static_cast<uint16_t>(v0*mul)); mem.write16(psq_next_addr(addr, 2), static_cast<uint16_t>(v1*mul)); break;
+        case PSQ_TYPE_S16: mem.write16(addr, static_cast<uint16_t>(static_cast<int16_t>(v0*mul))); mem.write16(psq_next_addr(addr, 2), static_cast<uint16_t>(static_cast<int16_t>(v1*mul))); break;
         default: break;
     }
 }
