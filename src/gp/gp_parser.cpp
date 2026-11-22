@@ -425,6 +425,24 @@ private:
         if (r.to_xfb) ++g_frames;
     }
 
+    void dump_state() const {
+        const State& s = g_state;
+        std::fprintf(stderr, "[STATE] gen=%06X zmode=%02X blend=%04X/%04X acmp=%06X scissor=%06X/%06X cullmode=%u\n", s.bp[0], s.bp[0x40], s.bp[0x41], s.bp[0x42],
+                     s.bp[0xF3], s.bp[0x20], s.bp[0x21], (s.bp[0] >> 14) & 3);
+        const int nst = int(((s.bp[0] >> 10) & 0xF) + 1);
+        for (int i = 0; i < nst; ++i)
+            std::fprintf(stderr, "[STATE] stage%d color=%06X alpha=%06X tref=%06X ksel=%06X\n", i, s.bp[0xC0 + 2 * i], s.bp[0xC1 + 2 * i], s.bp[0x28 + i / 2],
+                         s.bp[0xF6 + i / 2]);
+        for (int i = 0; i < 4; ++i)
+            std::fprintf(stderr, "[STATE] reg%d=(%g %g %g %g) konst%d=(%g %g %g %g)\n", i, s.tev_reg[i][0], s.tev_reg[i][1], s.tev_reg[i][2], s.tev_reg[i][3], i,
+                         s.tev_konst[i][0], s.tev_konst[i][1], s.tev_konst[i][2], s.tev_konst[i][3]);
+        for (int i = 0; i < 8; ++i)
+            std::fprintf(stderr, "[STATE] texgen%d info=%05X  map%d mode0=%06X img0=%06X img3=%06X\n", i, s.xf[0x1040 + i], i, s.bp[0x80 + (i < 4 ? i : i + 0x1C)],
+                         s.bp[0x88 + (i < 4 ? i : i + 0x1C)], s.bp[0x94 + (i < 4 ? i : i + 0x1C)]);
+        std::fprintf(stderr, "[STATE] fog=%06X/%06X/%06X/%06X ind=%06X genmode_ind=%u\n", s.bp[0xEE], s.bp[0xEF], s.bp[0xF0], s.bp[0xF1], s.bp[0x10],
+                     (s.bp[0] >> 16) & 7);
+    }
+
     void draw(Primitive prim, uint32_t count, const Layout& l, const uint8_t* data) {
         if (count == 0) return;
         ++g_stats.draws;
@@ -451,6 +469,15 @@ private:
         static int trace_n = 0;
         if (trace) {
             ++trace_n;
+            // GP_TRACE_STATE=n[,m...]: full TEV / texture / raster state at those draws of the traced frame.
+            if (const char* list = std::getenv("GP_TRACE_STATE")) {
+                for (const char* q = list; *q;) {
+                    char* end;
+                    const long n = std::strtol(q, &end, 10);
+                    if (n == trace_n) dump_state();
+                    q = *end ? end + 1 : end;
+                }
+            }
             std::fprintf(stderr,
                          "[DRAW] #%d prim=%u n=%u vsize=%u vcd=%06X/%04X gen=%06X tev=%u z=%02X blend=%04X acmp=%06X cc0=%06X ca0=%06X tref0=%06X img0=%06X/%06X ntexg=%u proj=%g %g %g %g %g %g o=%u vp=%g %g %g %g\n",
                          trace_n, unsigned(prim), count, l.size, s.vcd_lo, s.vcd_hi, s.bp[0], ((s.bp[0] >> 10) & 0xF) + 1, s.bp[0x40], s.bp[0x41], s.bp[0xF3],

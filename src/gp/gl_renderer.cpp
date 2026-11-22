@@ -381,11 +381,15 @@ void apply_state(const State& s) {
     glEnable(GL_SCISSOR_TEST);
     if (sw > 0 && sh > 0) glScissor(sx, kEfbHeight - (sy + sh), sw, sh);
 
-    const uint32_t cull = (s.bp[0x00] >> 14) & 3;
+    // GP_CULL=none: debugging aid, disables face culling.
+    static const bool no_cull = std::getenv("GP_CULL") && !std::strcmp(std::getenv("GP_CULL"), "none");
+    const uint32_t cull = no_cull ? 0 : (s.bp[0x00] >> 14) & 3;
     if (cull == 0) glDisable(GL_CULL_FACE);
     else {
         glEnable(GL_CULL_FACE);
-        glCullFace(cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK);
+        // GenMode cull field: 1 culls the faces GX calls back, 2 the front ones. GX's screen space has y down, OpenGL's
+        // clip space y up, so a triangle GX sees counter-clockwise is clockwise here: the faces swap.
+        glCullFace(cull == 1 ? GL_FRONT : cull == 2 ? GL_BACK : GL_FRONT_AND_BACK);
     }
 
     const uint32_t zmode = s.bp[0x40];
