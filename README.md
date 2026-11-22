@@ -222,6 +222,13 @@ GameCube audio uses a custom DSP with ADPCM compression:
   Each 8-byte frame decodes to 14 PCM samples.
 - **Voice Mixer**: 64 simultaneous voices with volume, pan, pitch, and looping
 - **XAudio2 Backend**: Windows audio output (stub, integration in progress)
+- **AI DMA** (`src/os/ai_funcs.cpp`, `audio_interface.h`): the SDK's AI functions
+  (`AIInitDMA`, `AIStartDMA`, `AIRegisterDMACallback`, ...) are replaced. The blocks of
+  big-endian PCM16 the game programs are converted and played through an `AudioSink`
+  (SDL3, or a null sink with `GCRECOMP_AUDIO=null`), and the game's DMA callback runs when a
+  block starts, where the game could have been interrupted (re-enabling interrupts, retrace
+  wait, clock read). `AIRegisterDMACallback` must be named in the game's symbol map. The DSP
+  (AX, or a game's own microcode) is not emulated. Tests: `ctest --test-dir build`.
 
 ### Input (`src/input/`)
 
