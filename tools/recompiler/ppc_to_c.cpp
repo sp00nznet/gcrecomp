@@ -83,16 +83,19 @@ namespace gcrecomp {
         case PPCInsnType::ADDC:
             emit("{ uint64_t t = (uint64_t)ctx->r[%u] + (uint64_t)ctx->r[%u]; ctx->r[%u] = (uint32_t)t; ctx->set_xer_ca(t >> 32); }",
                  insn.ra, insn.rb, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::ADDE:
             emit("{ uint64_t t = (uint64_t)ctx->r[%u] + (uint64_t)ctx->r[%u] + ctx->xer_ca(); ctx->r[%u] = (uint32_t)t; ctx->set_xer_ca(t >> 32); }",
                  insn.ra, insn.rb, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::ADDZE:
             emit("{ uint64_t t = (uint64_t)ctx->r[%u] + ctx->xer_ca(); ctx->r[%u] = (uint32_t)t; ctx->set_xer_ca(t >> 32); }",
                  insn.ra, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::ADDME:
@@ -115,11 +118,13 @@ namespace gcrecomp {
         case PPCInsnType::SUBFC:
             emit("{ uint64_t t = (uint64_t)ctx->r[%u] - (uint64_t)ctx->r[%u]; ctx->r[%u] = (uint32_t)t; ctx->set_xer_ca(!(t >> 32)); }",
                  insn.rb, insn.ra, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::SUBFE:
             emit("{ uint64_t t = (uint64_t)~ctx->r[%u] + (uint64_t)ctx->r[%u] + ctx->xer_ca(); ctx->r[%u] = (uint32_t)t; ctx->set_xer_ca(t >> 32); }",
                  insn.ra, insn.rb, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::SUBFIC:
@@ -156,11 +161,13 @@ namespace gcrecomp {
         case PPCInsnType::MULHW:
             emit("ctx->r[%u] = (uint32_t)((int64_t)(int32_t)ctx->r[%u] * (int64_t)(int32_t)ctx->r[%u] >> 32);",
                  insn.rd, insn.ra, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::MULHWU:
             emit("ctx->r[%u] = (uint32_t)((uint64_t)ctx->r[%u] * (uint64_t)ctx->r[%u] >> 32);",
                  insn.rd, insn.ra, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::DIVW:
@@ -169,10 +176,12 @@ namespace gcrecomp {
             emit("{ int32_t a = (int32_t)ctx->r[%u]; int32_t b = (int32_t)ctx->r[%u]; "
                  "ctx->r[%u] = (b == 0 || (a == INT32_MIN && b == -1)) ? (a < 0 ? 0xFFFFFFFFu : 0u) : (uint32_t)(a / b); }",
                  insn.ra, insn.rb, insn.rd);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         case PPCInsnType::DIVWU:
             emit("ctx->r[%u] = ctx->r[%u] == 0 ? 0u : ctx->r[%u] / ctx->r[%u];", insn.rd, insn.rb, insn.ra, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
             break;
 
         // ==== Integer Compare ====
@@ -245,18 +254,22 @@ namespace gcrecomp {
 
         case PPCInsnType::NAND:
             emit("ctx->r[%u] = ~(ctx->r[%u] & ctx->r[%u]);", insn.ra, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::ANDC:
             emit("ctx->r[%u] = ctx->r[%u] & ~ctx->r[%u];", insn.ra, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::ORC:
             emit("ctx->r[%u] = ctx->r[%u] | ~ctx->r[%u];", insn.ra, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::EQV:
             emit("ctx->r[%u] = ~(ctx->r[%u] ^ ctx->r[%u]);", insn.ra, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::EXTSB:
@@ -271,27 +284,32 @@ namespace gcrecomp {
 
         case PPCInsnType::CNTLZW:
             emit("ctx->r[%u] = PPC_CNTLZW(ctx->r[%u]);", insn.ra, insn.rs);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         // ==== Shift/Rotate ====
         case PPCInsnType::SLW:
             emit("ctx->r[%u] = (ctx->r[%u] & 0x20) ? 0 : (ctx->r[%u] << (ctx->r[%u] & 0x1F));",
                  insn.ra, insn.rb, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::SRW:
             emit("ctx->r[%u] = (ctx->r[%u] & 0x20) ? 0 : (ctx->r[%u] >> (ctx->r[%u] & 0x1F));",
                  insn.ra, insn.rb, insn.rs, insn.rb);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::SRAW:
             emit("{ int32_t s = (int32_t)ctx->r[%u]; uint32_t n = ctx->r[%u] & 0x3F; if (n > 31) { ctx->r[%u] = s >> 31; ctx->set_xer_ca(s < 0); } else { ctx->r[%u] = (uint32_t)(s >> n); ctx->set_xer_ca(s < 0 && (s & ((1 << n) - 1))); } }",
                  insn.rs, insn.rb, insn.ra, insn.ra);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::SRAWI:
             emit("{ int32_t s = (int32_t)ctx->r[%u]; ctx->r[%u] = (uint32_t)(s >> %u); ctx->set_xer_ca(s < 0 && (s & ((1 << %u) - 1))); }",
                  insn.rs, insn.ra, insn.sh, insn.sh);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
 
         case PPCInsnType::RLWINM: {
@@ -317,6 +335,7 @@ namespace gcrecomp {
             }
             emit("ctx->r[%u] = (PPC_ROTL32(ctx->r[%u], %u) & 0x%08X) | (ctx->r[%u] & 0x%08X);",
                  insn.ra, insn.rs, insn.sh, mask, insn.ra, ~mask);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
         }
 
@@ -328,6 +347,7 @@ namespace gcrecomp {
             }
             emit("ctx->r[%u] = PPC_ROTL32(ctx->r[%u], ctx->r[%u] & 0x1F) & 0x%08X;",
                  insn.ra, insn.rs, insn.rb, mask);
+            if (insn.rc) emit("ctx->update_cr0((int32_t)ctx->r[%u]);", insn.ra);
             break;
         }
 

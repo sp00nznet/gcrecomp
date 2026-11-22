@@ -165,7 +165,7 @@ needs for asset loading.
 | **Timing** | OSGetTime/Tick at 40.5MHz timebase | Done |
 | **Heap** | OSCreateHeap/OSAlloc/OSFree (first-fit w/ coalescing) | Done |
 | **Arena** | OSGet/SetArenaLo/Hi | Done |
-| **DVD** | DVDOpen/Read/Close from extracted files or mounted ISO | Done |
+| **DVD** | DVDOpen, DVDConvertPathToEntrynum/DVDFastOpen, Read/Close from extracted files or mounted ISO | Done |
 | **Disc Image** | mount_disc_image() — FST parsing, raw disc reads | Done |
 | **Yaz0** | Nintendo Yaz0 (SZS) decompression — standard LZ format | Done |
 | **RARC** | RARC archive parser — hierarchical file extraction | Done |

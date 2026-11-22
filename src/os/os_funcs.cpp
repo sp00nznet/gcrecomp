@@ -649,21 +649,8 @@ static std::string resolve_disc_path(const std::string& root, const std::string&
     return current.string();
 }
 
-// DVDOpen(const char* path, DVDFileInfo* info) -> BOOL
-static void dvd_open(PPCContext* ctx, Memory* mem) {
-    uint32_t path_addr = ctx->r[3];
-    uint32_t info_addr = ctx->r[4];
-
-    // Read path from emulated memory
-    char path[256];
-    int i = 0;
-    while (i < 255) {
-        char c = (char)mem->read8(path_addr + i);
-        if (c == 0) break;
-        path[i++] = c;
-    }
-    path[i] = 0;
-
+// Opens the disc file `path` for the DVDFileInfo at `info_addr`. Returns false when it does not exist.
+static bool open_disc_file(const char* path, uint32_t info_addr, Memory* mem) {
     // Convert game path to host path
     std::string host_path = g_game_root + "/" + path;
     for (char& c : host_path) {
@@ -675,23 +662,72 @@ static void dvd_open(PPCContext* ctx, Memory* mem) {
         const std::string resolved = resolve_disc_path(g_game_root, path);
         if (!resolved.empty()) fp = fopen(resolved.c_str(), "rb");
     }
-    if (fp) {
-        fseek(fp, 0, SEEK_END);
-        uint32_t file_size = (uint32_t)ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-
-        // Write file info to emulated memory
-        mem->write32(info_addr + os::DVDFileInfo::OFF_START, 0);
-        mem->write32(info_addr + os::DVDFileInfo::OFF_LENGTH, file_size);
-
-        g_open_dvd_files[info_addr] = fp;
-
-        printf("[DVD] Open: %s (%u bytes)\n", path, file_size);
-        ctx->r[3] = 1; // TRUE
-    } else {
+    if (!fp) {
         printf("[DVD] Open failed: %s (host: %s)\n", path, host_path.c_str());
-        ctx->r[3] = 0; // FALSE
+        return false;
     }
+    fseek(fp, 0, SEEK_END);
+    uint32_t file_size = (uint32_t)ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    // Write file info to emulated memory
+    mem->write32(info_addr + os::DVDFileInfo::OFF_START, 0);
+    mem->write32(info_addr + os::DVDFileInfo::OFF_LENGTH, file_size);
+
+    // A handle that is opened again (without DVDClose) must not leak its FILE.
+    auto it = g_open_dvd_files.find(info_addr);
+    if (it != g_open_dvd_files.end()) fclose(it->second);
+    g_open_dvd_files[info_addr] = fp;
+
+    printf("[DVD] Open: %s (%u bytes)\n", path, file_size);
+    return true;
+}
+
+static std::string read_guest_path(Memory* mem, uint32_t addr) {
+    std::string path;
+    for (int i = 0; i < 255; ++i) {
+        char c = (char)mem->read8(addr + i);
+        if (c == 0) break;
+        path.push_back(c);
+    }
+    return path;
+}
+
+// DVDOpen(const char* path, DVDFileInfo* info) -> BOOL
+static void dvd_open(PPCContext* ctx, Memory* mem) {
+    ctx->r[3] = open_disc_file(read_guest_path(mem, ctx->r[3]).c_str(), ctx->r[4], mem) ? 1 : 0;
+}
+
+// There is no FST in guest memory, so a disc "entry number" is an index into this table of the paths
+// DVDConvertPathToEntrynum has returned (entry 0 is the root directory in the real file system).
+static std::vector<std::string> g_dvd_entries;
+
+// DVDConvertPathToEntrynum(const char* path) -> s32 (-1 when the path does not exist)
+// Games with a movie player (the Hudson HVQM4 one of Tales of Symphonia) open "mov/op.h4m" by entry number.
+static void dvd_convert_path_to_entrynum(PPCContext* ctx, Memory* mem) {
+    const std::string path = read_guest_path(mem, ctx->r[3]);
+    if (resolve_disc_path(g_game_root, path).empty()) {
+        ctx->r[3] = (uint32_t)-1;
+        return;
+    }
+    for (size_t i = 0; i < g_dvd_entries.size(); ++i) {
+        if (g_dvd_entries[i] == path) {
+            ctx->r[3] = (uint32_t)(i + 1);
+            return;
+        }
+    }
+    g_dvd_entries.push_back(path);
+    ctx->r[3] = (uint32_t)g_dvd_entries.size();
+}
+
+// DVDFastOpen(s32 entrynum, DVDFileInfo* info) -> BOOL
+static void dvd_fast_open(PPCContext* ctx, Memory* mem) {
+    const uint32_t entry = ctx->r[3];
+    if (entry == 0 || entry > g_dvd_entries.size()) {
+        ctx->r[3] = 0;
+        return;
+    }
+    ctx->r[3] = open_disc_file(g_dvd_entries[entry - 1].c_str(), ctx->r[4], mem) ? 1 : 0;
 }
 
 // DVDClose(DVDFileInfo* info)
@@ -721,6 +757,17 @@ static void dvd_read_prio(PPCContext* ctx, Memory* mem) {
         uint8_t* dst = mem->translate(buf_addr);
         if (dst) {
             size_t read = fread(dst, 1, length, fp);
+            // A file occupies whole 32 byte blocks of the disc, and the drive transfers the
+            // whole request (and reports its length) when it ends inside the last block. The
+            // movie reader asks for 24064 bytes at the end of a 69230062 byte file and treats a
+            // shorter transfer as an error. Past the last block the transfer stays short.
+            fseek(fp, 0, SEEK_END);
+            const int64_t size = ftell(fp);
+            const int64_t padded_end = (size + 31) & ~int64_t(31);
+            if ((int64_t)read < length && offset >= 0 && (int64_t)offset + length <= padded_end) {
+                std::memset(dst + read, 0, length - read);
+                read = (size_t)length;
+            }
             ctx->r[3] = (uint32_t)read;
         } else {
             ctx->r[3] = 0;
@@ -1082,6 +1129,8 @@ static const OSFuncEntry g_os_func_table[] = {
 
     // --- DVD ---
     { "DVDOpen",                dvd_open },
+    { "DVDConvertPathToEntrynum", dvd_convert_path_to_entrynum },
+    { "DVDFastOpen",            dvd_fast_open },
     { "DVDClose",               dvd_close },
     { "DVDReadPrio",            dvd_read_prio },
     { "DVDReadAsync",           dvd_read_async },
