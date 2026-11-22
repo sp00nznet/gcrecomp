@@ -476,6 +476,13 @@ void apply_state(const State& s) {
     }
 }
 
+void print_feature_use() {
+    std::fprintf(stderr, "[GL] feature use: C14X2 textures %llu, mipmapped textures %llu, fog draws %llu, constant-alpha draws %llu, logic-op draws %llu, early-Z passes %llu\n",
+                 (unsigned long long)g_use.c14x2_textures, (unsigned long long)g_use.mip_textures, (unsigned long long)g_use.fog_draws,
+                 (unsigned long long)g_use.const_alpha_draws, (unsigned long long)g_use.logic_op_draws, (unsigned long long)g_use.early_z_passes);
+    if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
+}
+
 void write_screenshot() {
     static uint64_t presented = 0;
     static const int every = [] {
@@ -578,10 +585,7 @@ bool init(int window_w, int window_h, const char* screenshot_dir, int max_screen
 }
 
 void shutdown() {
-    std::fprintf(stderr, "[GL] feature use: C14X2 textures %llu, mipmapped textures %llu, fog draws %llu, constant-alpha draws %llu, logic-op draws %llu, early-Z passes %llu\n",
-                 (unsigned long long)g_use.c14x2_textures, (unsigned long long)g_use.mip_textures, (unsigned long long)g_use.fog_draws,
-                 (unsigned long long)g_use.const_alpha_draws, (unsigned long long)g_use.logic_op_draws, (unsigned long long)g_use.early_z_passes);
-    if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
+    print_feature_use();
     if (g_context) SDL_GL_DestroyContext(g_context);
     if (g_window) SDL_DestroyWindow(g_window);
     g_context = nullptr;
@@ -695,6 +699,8 @@ void copy_efb(const CopyRequest& r, const State& s) {
                      r.w, r.h, s.bp[0x4D], s.bp[0x4E], g_window_w, g_window_h);
     }
     if (r.to_xfb) {
+        static uint64_t presented = 0;
+        if (++presented % 600 == 0 && std::getenv("GP_TRACE")) print_feature_use();
         // Blit the copied EFB region to the window and present.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
