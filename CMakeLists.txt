@@ -28,6 +28,7 @@ endif()
 option(GCRECOMP_BUILD_TOOLS "Build recompiler tools" ON)
 option(GCRECOMP_BUILD_RUNTIME "Build the game runtime libraries" ON)
 option(GCRECOMP_BUILD_EXAMPLE "Build the example launcher" ON)
+option(GCRECOMP_BUILD_TESTS "Build the unit tests" OFF)
 
 # ===========================================================================
 # Runtime Library: Links with recompiled game code
@@ -100,12 +101,20 @@ if(GCRECOMP_BUILD_RUNTIME)
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
             src/gp/gl_renderer.cpp
+            src/gp/gp_decode.cpp
         )
         target_include_directories(gcrecomp_gp PUBLIC include)
         target_include_directories(gcrecomp_gp PRIVATE ${SDL3_INCLUDE_DIRS})
         # The texture decoders live in gcrecomp_gx.
         target_link_libraries(gcrecomp_gp PUBLIC gcrecomp_gx ${SDL3_LINK_LIBRARIES} GL)
         target_link_directories(gcrecomp_gp PUBLIC ${SDL3_LIBRARY_DIRS})
+        if(GCRECOMP_BUILD_TESTS)
+            enable_testing()
+            add_executable(gp_decode_test tests/gp_decode_test.cpp)
+            target_include_directories(gp_decode_test PRIVATE src/gp)
+            target_link_libraries(gp_decode_test PRIVATE gcrecomp_gp)
+            add_test(NAME gp_decode_test COMMAND gp_decode_test)
+        endif()
     else()
         message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")
     endif()

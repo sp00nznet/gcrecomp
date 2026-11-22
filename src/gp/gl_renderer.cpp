@@ -20,6 +20,7 @@
 
 #include "gcrecomp/gx/gx.h"
 #include "gcrecomp/runtime.h"
+#include "gp_decode.h"
 #include "gp_internal.h"
 
 namespace gcrecomp::gx {
@@ -227,79 +228,28 @@ uint64_t hash_bytes(const uint8_t* p, size_t n) {
     return h;
 }
 
-// Bytes occupied by a texture in memory, including padding to whole tiles.
-size_t texture_bytes(uint32_t w, uint32_t h, uint32_t fmt) {
-    uint32_t bw, bh, bytes;
-    switch (fmt) {
-        case 0: case 8: case 14: bw = 8; bh = 8; bytes = 32; break;   // I4, C4, CMPR
-        case 1: case 2: case 9: bw = 8; bh = 4; bytes = 32; break;    // I8, IA4, C8
-        case 6: bw = 4; bh = 4; bytes = 64; break;                    // RGBA8
-        default: bw = 4; bh = 4; bytes = 32; break;                   // 16-bit formats
-    }
-    return size_t((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
-}
-
-// C4/C8: the indices use the I4/I8 tile layouts, so decode as intensity to recover them, then look
-// each one up in the palette loaded by BP 0x64/0x65.
-std::vector<uint8_t> decode_indexed(const State& s, const uint8_t* src, uint32_t w, uint32_t h, uint32_t fmt,
-                                    uint32_t settlut) {
-    const bool c4 = fmt == 8;
-    const std::vector<uint8_t> idx = gx::decode_texture(src, w, h, c4 ? gx::GX_TF_I4 : gx::GX_TF_I8);
-    const uint8_t* pal = s.tlut + (settlut & 0x3FF) * 512;
-    const uint32_t pal_fmt = (settlut >> 10) & 3;
-    std::vector<uint8_t> out(size_t(w) * h * 4);
-    for (size_t p = 0; p < size_t(w) * h; ++p) {
-        const uint32_t i = c4 ? idx[p * 4] / 17 : idx[p * 4];
-        const uint32_t e = (uint32_t(pal[2 * i]) << 8) | pal[2 * i + 1];
-        uint8_t r, g, b, a;
-        if (pal_fmt == 0) {  // IA8: alpha in the high byte, intensity in the low byte
-            a = uint8_t(e >> 8);
-            r = g = b = uint8_t(e);
-        } else if (pal_fmt == 1) {  // RGB565
-            r = uint8_t(((e >> 11) & 31) * 255 / 31);
-            g = uint8_t(((e >> 5) & 63) * 255 / 63);
-            b = uint8_t((e & 31) * 255 / 31);
-            a = 255;
-        } else if (e & 0x8000) {  // RGB5A3, opaque: RGB555
-            r = uint8_t(((e >> 10) & 31) * 255 / 31);
-            g = uint8_t(((e >> 5) & 31) * 255 / 31);
-            b = uint8_t((e & 31) * 255 / 31);
-            a = 255;
-        } else {  // RGB5A3, translucent: A3 R4 G4 B4
-            a = uint8_t(((e >> 12) & 7) * 255 / 7);
-            r = uint8_t(((e >> 8) & 15) * 17);
-            g = uint8_t(((e >> 4) & 15) * 17);
-            b = uint8_t((e & 15) * 17);
-        }
-        out[p * 4] = r;
-        out[p * 4 + 1] = g;
-        out[p * 4 + 2] = b;
-        out[p * 4 + 3] = a;
-    }
-    return out;
-}
-
 GLuint texture_for_map(const State& s, int map) {
     const uint32_t img0 = s.bp[map < 4 ? 0x88 + map : 0xA8 + (map - 4)];
     const uint32_t img3 = s.bp[map < 4 ? 0x94 + map : 0xB4 + (map - 4)];
     const uint32_t mode0 = s.bp[map < 4 ? 0x80 + map : 0xA0 + (map - 4)];
     const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 0xF;
     const uint32_t addr = (img3 & 0xFFFFFF) << 5;
-    if (fmt == 10) {  // C14X2 is not supported yet
-        glBindTexture(GL_TEXTURE_2D, g_white);
-        return g_white;
-    }
-
-    const bool indexed = fmt == 8 || fmt == 9;
+    const bool indexed = fmt == kTexC4 || fmt == kTexC8 || fmt == kTexC14X2;
     const uint32_t settlut = indexed ? s.bp[map < 4 ? 0x98 + map : 0xB8 + (map - 4)] : 0;
     const size_t bytes = texture_bytes(w, h, fmt);
     const uint8_t* src = g_mem.translate(addr);
     const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt;
     uint64_t hash = hash_bytes(src, bytes);
-    if (indexed) hash ^= hash_bytes(s.tlut + (settlut & 0x3FF) * 512, fmt == 8 ? 32 : 512) * 31 + settlut;
+    if (indexed) {
+        // Hash the part of the TLUT the format can reach: 16, 256 or 16384 entries of 2 bytes.
+        const size_t entries = fmt == kTexC4 ? 16 : fmt == kTexC8 ? 256 : 16384;
+        const size_t base = size_t(settlut & 0x3FF) * 512;
+        const size_t len = std::min(entries * 2, sizeof(s.tlut) - base);
+        hash ^= hash_bytes(s.tlut + base, len) * 31 + settlut;
+    }
     CachedTexture& t = g_textures[key];
     if (t.id == 0 || t.hash != hash) {
-        std::vector<uint8_t> rgba = indexed ? decode_indexed(s, src, w, h, fmt, settlut)
+        std::vector<uint8_t> rgba = indexed ? decode_indexed(s.tlut, sizeof(s.tlut), src, w, h, fmt, settlut)
                                             : gx::decode_texture(src, w, h, gx::GXTexFmt(fmt));
         if (const char* dir = std::getenv("GP_DUMP_TEX")) {
             static int dumped = 0;
