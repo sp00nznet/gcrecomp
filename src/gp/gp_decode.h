@@ -98,4 +98,18 @@ float fog_factor(const FogParams& p, uint32_t z24);
 // Bit i is set when TEV stage i of the current draw does an indirect lookup (0 when none does).
 uint32_t indirect_tev_stages(const uint32_t* bp);
 
+// ---- Z compare location -------------------------------------------------------------------------
+//
+// BP 0x43 PE_CONTROL bit 6 (GXSetZCompLoc): the depth test runs before texturing ("early Z"). The
+// depth buffer is then updated even for pixels the alpha test rejects afterwards; with the test
+// after texturing (late Z) a rejected pixel leaves the depth buffer alone. OpenGL discards before the
+// depth write, which is the late behaviour, so early Z needs a second, depth-only pass.
+
+// True when the alpha test (BP 0xF3) can reject some pixels.
+bool alpha_test_can_reject(uint32_t alpha_compare);
+
+// True when a draw has to write depth for pixels rejected by the alpha test: early Z, depth test and
+// depth update enabled (BP 0x40), and an alpha test that can reject.
+bool early_z_writes_rejected_pixels(const uint32_t* bp);
+
 }  // namespace gcrecomp::gp

@@ -193,4 +193,51 @@ uint32_t indirect_tev_stages(const uint32_t* bp) {
     return mask;
 }
 
+namespace {
+enum class Tri { Never, Always, Unknown };
+
+// What one alpha comparison (0 never, 1 <, 2 ==, 3 <=, 4 >, 5 !=, 6 >=, 7 always) does for every alpha
+// value 0..255 against `ref`.
+Tri alpha_compare_result(uint32_t func, uint32_t ref) {
+    switch (func) {
+        case 0: return Tri::Never;
+        case 1: return ref == 0 ? Tri::Never : Tri::Unknown;
+        case 3: return ref == 255 ? Tri::Always : Tri::Unknown;
+        case 4: return ref == 255 ? Tri::Never : Tri::Unknown;
+        case 6: return ref == 0 ? Tri::Always : Tri::Unknown;
+        case 7: return Tri::Always;
+        default: return Tri::Unknown;
+    }
+}
+}  // namespace
+
+bool alpha_test_can_reject(uint32_t ac) {
+    const Tri a = alpha_compare_result((ac >> 16) & 7, ac & 0xFF);
+    const Tri b = alpha_compare_result((ac >> 19) & 7, (ac >> 8) & 0xFF);
+    Tri r = Tri::Unknown;
+    switch ((ac >> 22) & 3) {
+        case 0:  // AND
+            if (a == Tri::Never || b == Tri::Never) r = Tri::Never;
+            else if (a == Tri::Always && b == Tri::Always) r = Tri::Always;
+            break;
+        case 1:  // OR
+            if (a == Tri::Always || b == Tri::Always) r = Tri::Always;
+            else if (a == Tri::Never && b == Tri::Never) r = Tri::Never;
+            break;
+        default:  // XOR (2), XNOR (3)
+            if (a != Tri::Unknown && b != Tri::Unknown) {
+                const bool same = a == b;
+                r = ((((ac >> 22) & 3) == 3) == same) ? Tri::Always : Tri::Never;
+            }
+            break;
+    }
+    return r != Tri::Always;
+}
+
+bool early_z_writes_rejected_pixels(const uint32_t* bp) {
+    const bool early = (bp[0x43] >> 6) & 1;
+    const bool depth_test = bp[0x40] & 1, depth_write = (bp[0x40] >> 4) & 1;
+    return early && depth_test && depth_write && alpha_test_can_reject(bp[0xF3]);
+}
+
 }  // namespace gcrecomp::gp

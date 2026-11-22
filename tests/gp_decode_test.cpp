@@ -228,6 +228,42 @@ static void test_indirect_detection() {
     CHECK(indirect_tev_stages(bp) == 0);
 }
 
+static uint32_t alpha_cmp(uint32_t c0, uint32_t ref0, uint32_t c1, uint32_t ref1, uint32_t logic) {
+    return ref0 | (ref1 << 8) | (c0 << 16) | (c1 << 19) | (logic << 22);
+}
+
+static void test_alpha_test_can_reject() {
+    enum { NEVER, LESS, EQUAL, LEQUAL, GREATER, NEQUAL, GEQUAL, ALWAYS };
+    enum { AND, OR, XOR, XNOR };
+    CHECK(!alpha_test_can_reject(alpha_cmp(ALWAYS, 0, ALWAYS, 0, AND)));      // GXSetAlphaCompare default
+    CHECK(alpha_test_can_reject(alpha_cmp(GREATER, 128, ALWAYS, 0, AND)));    // typical cutout
+    CHECK(!alpha_test_can_reject(alpha_cmp(GEQUAL, 0, ALWAYS, 0, AND)));      // everything passes
+    CHECK(!alpha_test_can_reject(alpha_cmp(LEQUAL, 255, ALWAYS, 0, AND)));
+    CHECK(alpha_test_can_reject(alpha_cmp(NEVER, 0, ALWAYS, 0, AND)));
+    CHECK(!alpha_test_can_reject(alpha_cmp(GREATER, 128, ALWAYS, 0, OR)));    // the OR makes it pass
+    CHECK(alpha_test_can_reject(alpha_cmp(GREATER, 128, GREATER, 64, OR)));
+    CHECK(alpha_test_can_reject(alpha_cmp(ALWAYS, 0, ALWAYS, 0, XOR)));       // always XOR always = never passes
+    CHECK(!alpha_test_can_reject(alpha_cmp(ALWAYS, 0, ALWAYS, 0, XNOR)));
+    CHECK(!alpha_test_can_reject(alpha_cmp(NEVER, 0, NEVER, 0, XNOR)));
+    CHECK(!alpha_test_can_reject(alpha_cmp(ALWAYS, 0, NEVER, 0, XOR)));
+}
+
+static void test_early_z() {
+    uint32_t bp[256] = {};
+    bp[0xF3] = alpha_cmp(4, 128, 7, 0, 0);  // alpha > 128
+    bp[0x40] = 0x1 | (3 << 1) | 0x10;       // depth test LEQUAL, update on
+    CHECK(!early_z_writes_rejected_pixels(bp));      // late Z: discard semantics are already right
+    bp[0x43] = 0x40;
+    CHECK(early_z_writes_rejected_pixels(bp));
+    bp[0x40] &= ~0x10u;                                // no depth write: nothing to emulate
+    CHECK(!early_z_writes_rejected_pixels(bp));
+    bp[0x40] = 0x10;                                   // depth test off
+    CHECK(!early_z_writes_rejected_pixels(bp));
+    bp[0x40] = 0x1 | 0x10;
+    bp[0xF3] = alpha_cmp(7, 0, 7, 0, 0);               // no alpha test
+    CHECK(!early_z_writes_rejected_pixels(bp));
+}
+
 int main() {
     test_c14x2();
     test_c14x2_out_of_range();
@@ -239,6 +275,8 @@ int main() {
     test_fog_types();
     test_fog_orthographic();
     test_indirect_detection();
+    test_alpha_test_can_reject();
+    test_early_z();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

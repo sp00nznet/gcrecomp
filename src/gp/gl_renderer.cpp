@@ -642,6 +642,15 @@ void draw(const DrawCall& call, const State& s) {
         }
     }
     glDrawArrays(mode, 0, GLsizei(count));
+    if (early_z_writes_rejected_pixels(s.bp)) {
+        // Z compare before texturing: pixels the alpha test rejected still update depth. Replay the
+        // draw without color and without the alpha test; pixels that passed already wrote their depth
+        // and fail the depth test against themselves, the rejected ones write it now. apply_state
+        // restores the color mask and the alpha test uniform for the next draw.
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), 7u | (7u << 3), 0u);
+        glDrawArrays(mode, 0, GLsizei(count));
+    }
 }
 
 void copy_efb(const CopyRequest& r, const State& s) {
