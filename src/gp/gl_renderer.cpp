@@ -239,21 +239,86 @@ size_t texture_bytes(uint32_t w, uint32_t h, uint32_t fmt) {
     return size_t((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
 }
 
+// C4/C8: the indices use the I4/I8 tile layouts, so decode as intensity to recover them, then look
+// each one up in the palette loaded by BP 0x64/0x65.
+std::vector<uint8_t> decode_indexed(const State& s, const uint8_t* src, uint32_t w, uint32_t h, uint32_t fmt,
+                                    uint32_t settlut) {
+    const bool c4 = fmt == 8;
+    const std::vector<uint8_t> idx = gx::decode_texture(src, w, h, c4 ? gx::GX_TF_I4 : gx::GX_TF_I8);
+    const uint8_t* pal = s.tlut + (settlut & 0x3FF) * 512;
+    const uint32_t pal_fmt = (settlut >> 10) & 3;
+    std::vector<uint8_t> out(size_t(w) * h * 4);
+    for (size_t p = 0; p < size_t(w) * h; ++p) {
+        const uint32_t i = c4 ? idx[p * 4] / 17 : idx[p * 4];
+        const uint32_t e = (uint32_t(pal[2 * i]) << 8) | pal[2 * i + 1];
+        uint8_t r, g, b, a;
+        if (pal_fmt == 0) {  // IA8: alpha in the high byte, intensity in the low byte
+            a = uint8_t(e >> 8);
+            r = g = b = uint8_t(e);
+        } else if (pal_fmt == 1) {  // RGB565
+            r = uint8_t(((e >> 11) & 31) * 255 / 31);
+            g = uint8_t(((e >> 5) & 63) * 255 / 63);
+            b = uint8_t((e & 31) * 255 / 31);
+            a = 255;
+        } else if (e & 0x8000) {  // RGB5A3, opaque: RGB555
+            r = uint8_t(((e >> 10) & 31) * 255 / 31);
+            g = uint8_t(((e >> 5) & 31) * 255 / 31);
+            b = uint8_t((e & 31) * 255 / 31);
+            a = 255;
+        } else {  // RGB5A3, translucent: A3 R4 G4 B4
+            a = uint8_t(((e >> 12) & 7) * 255 / 7);
+            r = uint8_t(((e >> 8) & 15) * 17);
+            g = uint8_t(((e >> 4) & 15) * 17);
+            b = uint8_t((e & 15) * 17);
+        }
+        out[p * 4] = r;
+        out[p * 4 + 1] = g;
+        out[p * 4 + 2] = b;
+        out[p * 4 + 3] = a;
+    }
+    return out;
+}
+
 GLuint texture_for_map(const State& s, int map) {
     const uint32_t img0 = s.bp[map < 4 ? 0x88 + map : 0xA8 + (map - 4)];
     const uint32_t img3 = s.bp[map < 4 ? 0x94 + map : 0xB4 + (map - 4)];
     const uint32_t mode0 = s.bp[map < 4 ? 0x80 + map : 0xA0 + (map - 4)];
     const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 0xF;
     const uint32_t addr = (img3 & 0xFFFFFF) << 5;
-    if (fmt == 8 || fmt == 9 || fmt == 10) return g_white;  // palette formats: not supported yet
+    if (fmt == 10) {  // C14X2 is not supported yet
+        glBindTexture(GL_TEXTURE_2D, g_white);
+        return g_white;
+    }
 
+    const bool indexed = fmt == 8 || fmt == 9;
+    const uint32_t settlut = indexed ? s.bp[map < 4 ? 0x98 + map : 0xB8 + (map - 4)] : 0;
     const size_t bytes = texture_bytes(w, h, fmt);
     const uint8_t* src = g_mem.translate(addr);
     const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt;
-    const uint64_t hash = hash_bytes(src, bytes);
+    uint64_t hash = hash_bytes(src, bytes);
+    if (indexed) hash ^= hash_bytes(s.tlut + (settlut & 0x3FF) * 512, fmt == 8 ? 32 : 512) * 31 + settlut;
     CachedTexture& t = g_textures[key];
     if (t.id == 0 || t.hash != hash) {
-        std::vector<uint8_t> rgba = gx::decode_texture(src, w, h, gx::GXTexFmt(fmt));
+        std::vector<uint8_t> rgba = indexed ? decode_indexed(s, src, w, h, fmt, settlut)
+                                            : gx::decode_texture(src, w, h, gx::GXTexFmt(fmt));
+        if (const char* dir = std::getenv("GP_DUMP_TEX")) {
+            static int dumped = 0;
+            if (dumped < 24) {
+                char path[512];
+                std::snprintf(path, sizeof(path), "%s/tex_%02d_fmt%X_%ux%u_%06X.ppm", dir, dumped++, fmt, w, h, addr);
+                if (FILE* f = std::fopen(path, "wb")) {
+                    std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                    for (size_t i = 0; i < size_t(w) * h; ++i) {
+                        const uint8_t a = rgba[i * 4 + 3];
+                        const uint8_t px[3] = {uint8_t(rgba[i * 4] * a / 255 + 64 * (255 - a) / 255),
+                                               uint8_t(rgba[i * 4 + 1] * a / 255 + 64 * (255 - a) / 255),
+                                               uint8_t(rgba[i * 4 + 2] * a / 255 + 64 * (255 - a) / 255)};
+                        std::fwrite(px, 1, 3, f);
+                    }
+                    std::fclose(f);
+                }
+            }
+        }
         if (t.id == 0) glGenTextures(1, &t.id);
         glBindTexture(GL_TEXTURE_2D, t.id);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -546,10 +611,30 @@ void draw(const DrawCall& call, const State& s) {
     }
     if (count == 0) return;
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(size_t(count) * kVertexFloats * sizeof(float)), data, GL_STREAM_DRAW);
+    if (std::getenv("GP_XHIST")) {
+        static float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+        static int frame_draws = 0;
+        for (uint32_t v = 0; v < count; ++v) {
+            const float w = data[size_t(v) * kVertexFloats + 3];
+            const float cx = data[size_t(v) * kVertexFloats] / w, cy = data[size_t(v) * kVertexFloats + 1] / w;
+            minx = std::min(minx, cx); maxx = std::max(maxx, cx); miny = std::min(miny, cy); maxy = std::max(maxy, cy);
+        }
+        ++frame_draws;
+        if (frame_draws == 60) {
+            std::fprintf(stderr, "[GL] clip bbox over 60 draws: x %g..%g y %g..%g\n", minx, maxx, miny, maxy);
+            frame_draws = 0; minx = miny = 1e9f; maxx = maxy = -1e9f;
+        }
+    }
     glDrawArrays(mode, 0, GLsizei(count));
 }
 
 void copy_efb(const CopyRequest& r, const State& s) {
+    static int traced = 0;
+    if (traced < 6 && std::getenv("GP_TRACE")) {
+        ++traced;
+        std::fprintf(stderr, "[GL] copy to_xfb=%d clear=%d src=(%d,%d) %dx%d bp4D=%06X bp4E=%06X window=%dx%d\n", r.to_xfb, r.clear, r.x, r.y,
+                     r.w, r.h, s.bp[0x4D], s.bp[0x4E], g_window_w, g_window_h);
+    }
     if (r.to_xfb) {
         // Blit the copied EFB region to the window and present.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
@@ -577,11 +662,74 @@ void copy_efb(const CopyRequest& r, const State& s) {
     }
 }
 
+// Keyboard mapping: arrows = D-pad and left stick, Enter or Z = A, X or Backspace = B, C = X, V = Y,
+// Space = Start, W = Z, Q = L, E = R.
+void update_pad_from_keyboard() {
+    const bool* k = SDL_GetKeyboardState(nullptr);
+    PadState& p = g_pad[0];
+    uint16_t b = 0;
+    if (k[SDL_SCANCODE_LEFT]) b |= 0x0001;
+    if (k[SDL_SCANCODE_RIGHT]) b |= 0x0002;
+    if (k[SDL_SCANCODE_DOWN]) b |= 0x0004;
+    if (k[SDL_SCANCODE_UP]) b |= 0x0008;
+    if (k[SDL_SCANCODE_W]) b |= 0x0010;
+    if (k[SDL_SCANCODE_E]) b |= 0x0020;
+    if (k[SDL_SCANCODE_Q]) b |= 0x0040;
+    if (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_Z]) b |= 0x0100;
+    if (k[SDL_SCANCODE_X] || k[SDL_SCANCODE_BACKSPACE]) b |= 0x0200;
+    if (k[SDL_SCANCODE_C]) b |= 0x0400;
+    if (k[SDL_SCANCODE_V]) b |= 0x0800;
+    if (k[SDL_SCANCODE_SPACE]) b |= 0x1000;
+    p.buttons = b;
+    p.stick_x = int8_t((k[SDL_SCANCODE_RIGHT] ? 80 : 0) - (k[SDL_SCANCODE_LEFT] ? 80 : 0));
+    p.stick_y = int8_t((k[SDL_SCANCODE_UP] ? 80 : 0) - (k[SDL_SCANCODE_DOWN] ? 80 : 0));
+    p.trigger_l = (b & 0x0040) ? 255 : 0;
+    p.trigger_r = (b & 0x0020) ? 255 : 0;
+    // Scripted input for tests: TOS_SCRIPT="frame:button,frame:button,..." holds a button for five
+    // frames starting at each frame. Buttons: A B X Y S(tart) U D L R (D-pad).
+    struct Step {
+        int frame;
+        uint16_t mask;
+    };
+    static const std::vector<Step> script = [] {
+        std::vector<Step> steps;
+        const char* v = std::getenv("TOS_SCRIPT");
+        for (const char* c = v; c && *c;) {
+            const int frame = std::atoi(c);
+            const char* colon = std::strchr(c, ':');
+            if (!colon) break;
+            uint16_t mask = 0;
+            switch (colon[1]) {
+                case 'A': mask = 0x0100; break;
+                case 'B': mask = 0x0200; break;
+                case 'X': mask = 0x0400; break;
+                case 'Y': mask = 0x0800; break;
+                case 'S': mask = 0x1000; break;
+                case 'U': mask = 0x0008; break;
+                case 'D': mask = 0x0004; break;
+                case 'L': mask = 0x0001; break;
+                case 'R': mask = 0x0002; break;
+                default: break;
+            }
+            steps.push_back({frame, mask});
+            const char* comma = std::strchr(colon, ',');
+            if (!comma) break;
+            c = comma + 1;
+        }
+        return steps;
+    }();
+    static int frame = 0;
+    ++frame;
+    for (const Step& s : script)
+        if (frame >= s.frame && frame < s.frame + 5) p.buttons |= s.mask;
+}
+
 bool pump_events() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) g_closed = true;
     }
+    update_pad_from_keyboard();
     return !g_closed;
 }
 

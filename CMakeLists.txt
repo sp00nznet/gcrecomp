@@ -45,6 +45,8 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/ar_funcs.cpp
         src/os/dvd_funcs.cpp
         src/os/gx_funcs.cpp
+        src/os/pad_funcs.cpp
+        src/os/thread_funcs.cpp
         src/os/rel.cpp
     )
     target_include_directories(gcrecomp_runtime PUBLIC include)

@@ -391,6 +391,13 @@ private:
                 dst[1] = s10(value >> 12);
             }
         }
+        if (reg == 0x65) {
+            // LOADTLUT1: copy `count` 32-byte lines from the address given by LOADTLUT0 into TLUT memory.
+            const uint32_t src = (s.bp[0x64] & 0x1FFFFF) << 5;
+            const uint32_t offset = (value & 0x3FF) * 512;
+            const uint32_t bytes = ((value >> 10) & 0x7FF) * 32;
+            if (offset + bytes <= sizeof(s.tlut)) std::memcpy(s.tlut + offset, g_mem.translate(src), bytes);
+        }
         if (reg == 0x47 || reg == 0x48) {
             // Draw-sync token: GXReadDrawSync reads it from the PE register at 0xCC00100E.
             uint8_t* pe = g_mem.hw_regs + (0xCC00100E - Memory::HW_REG_BASE);

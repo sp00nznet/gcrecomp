@@ -312,6 +312,18 @@ extern void (*g_wgp_write)(uint32_t size, uint64_t value);
 
 // Called once per VIWaitForRetrace, on the game's thread (window events are pumped here).
 extern void (*g_retrace_hook)();
+
+// Per-function counters of calls that reached a native replacement, for diagnosing what a game is doing.
+void hle_count(const char* name);
+void hle_dump(size_t top);  // prints the most called replacements, most first
+
+// State of a GameCube controller as the PAD replacements report it. Updated by the window layer.
+struct PadState {
+    uint16_t buttons = 0;  // PAD_BUTTON_* bits: LEFT 1, RIGHT 2, DOWN 4, UP 8, Z 0x10, R 0x20, L 0x40, A 0x100, B 0x200, X 0x400, Y 0x800, START 0x1000
+    int8_t stick_x = 0, stick_y = 0, substick_x = 0, substick_y = 0;
+    uint8_t trigger_l = 0, trigger_r = 0;
+};
+extern PadState g_pad[4];
 extern FuncTable  g_func_table;
 
 // =============================================================================

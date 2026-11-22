@@ -410,8 +410,8 @@ int main(int argc, char** argv) {
             if (func.name.rfind("func_", 0) != 0) {
                 fprintf(current_file,
                         "    { static const gcrecomp::RecompiledFunc hle_ = gcrecomp::lookup_os_func(\"%s\");\n"
-                        "      if (hle_) { hle_(ctx, mem); return; } }\n",
-                        func.name.c_str());
+                        "      if (hle_) { gcrecomp::hle_count(\"%s\"); hle_(ctx, mem); return; } }\n",
+                        func.name.c_str(), func.name.c_str());
             }
 
             PPCToCEmitter emitter(current_file);

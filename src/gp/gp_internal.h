@@ -23,6 +23,9 @@ struct State {
     // written through BP 0xE0-0xE7; bit 23 of the data selects the bank.
     float tev_reg[4][4] = {};
     float tev_konst[4][4] = {};
+
+    // Texture lookup table memory, indexed as (BP 0x65 offset field) * 512 bytes, loaded by BP 0x64/0x65.
+    uint8_t tlut[0x400 * 512] = {};
     // BP (raster, TEV, texture, blend, copy): 256 registers of 24 bits.
     uint32_t bp[256] = {};
 

@@ -41,6 +41,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
+#include <map>
 
 namespace gcrecomp {
 
@@ -1004,6 +1006,23 @@ static void vi_set_black(PPCContext* ctx, Memory* mem) {
 // Without this the game loop runs at infinite speed and hangs.
 void (*g_retrace_hook)() = nullptr;
 
+static std::unordered_map<const char*, uint64_t>& hle_counters() {
+    static std::unordered_map<const char*, uint64_t> counters;
+    return counters;
+}
+
+void hle_count(const char* name) { ++hle_counters()[name]; }
+
+void hle_dump(size_t top) {
+    std::map<std::string, uint64_t> by_name;
+    for (const auto& [name, n] : hle_counters()) by_name[name] += n;
+    std::vector<std::pair<uint64_t, std::string>> sorted;
+    for (const auto& [name, n] : by_name) sorted.push_back({n, name});
+    std::sort(sorted.rbegin(), sorted.rend());
+    for (size_t i = 0; i < sorted.size() && i < top; ++i)
+        std::fprintf(stderr, "[hle] %-28s %llu\n", sorted[i].second.c_str(), (unsigned long long)sorted[i].first);
+}
+
 static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
     g_vi_retrace_count++;
     if (g_retrace_hook) g_retrace_hook();
@@ -1118,8 +1137,16 @@ static void card_init(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = (uint32_t)CARD_RESULT_READY;
 }
 
+// Whether a memory card is reported in the slots. Off by default: the card HLE below is a stub that
+// reports success without storing anything, so a game that finds a card would try to use it.
+bool g_card_inserted = false;
+
 // CARDProbeEx(slot, memSize_ptr, sectorSize_ptr) -> result
 static void card_probe_ex(PPCContext* ctx, Memory* mem) {
+    if (!g_card_inserted) {
+        ctx->r[3] = (uint32_t)CARD_RESULT_NOCARD;
+        return;
+    }
     uint32_t slot          = ctx->r[3];
     uint32_t mem_size_ptr  = ctx->r[4];
     uint32_t sec_size_ptr  = ctx->r[5];
@@ -1546,6 +1573,8 @@ void register_os_functions() {
 RecompiledFunc lookup_ar_func(const char* name);   // src/os/ar_funcs.cpp
 RecompiledFunc lookup_dvd_func(const char* name);  // src/os/dvd_funcs.cpp
 RecompiledFunc lookup_gx_func(const char* name);   // src/os/gx_funcs.cpp
+RecompiledFunc lookup_pad_func(const char* name);  // src/os/pad_funcs.cpp
+RecompiledFunc lookup_thread_func(const char* name);  // src/os/thread_funcs.cpp
 
 // Lookup OS function by name (called during symbol map loading)
 RecompiledFunc lookup_os_func(const char* name) {
@@ -1556,7 +1585,9 @@ RecompiledFunc lookup_os_func(const char* name) {
     }
     if (RecompiledFunc f = lookup_ar_func(name)) return f;
     if (RecompiledFunc f = lookup_dvd_func(name)) return f;
-    return lookup_gx_func(name);
+    if (RecompiledFunc f = lookup_gx_func(name)) return f;
+    if (RecompiledFunc f = lookup_pad_func(name)) return f;
+    return lookup_thread_func(name);
 }
 
 // Set the root directory for game file access (DVD HLE)
