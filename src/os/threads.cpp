@@ -5,6 +5,7 @@
 #include "gcrecomp/threads.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -24,6 +25,8 @@
 
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
+#include "gcrecomp/interrupts.h"
+#include "gcrecomp/vi.h"
 
 namespace gcrecomp::sched {
 
@@ -46,9 +49,7 @@ struct GThread {
     std::condition_variable cv;  // the thread waits here for the baton
     PPCContext* ctx = nullptr;   // context of the guest code that calls into the scheduler
     uint64_t seq = 0;            // FIFO order among threads of equal priority
-    bool waiting = false;        // on a thread queue, or in a timed sleep
-    bool timed = false;
-    Clock::time_point wake_at;
+    bool waiting = false;        // on a thread queue
     bool exited = false;         // moribund
     bool killed = false;         // the host thread must unwind
     bool is_main = false;
@@ -71,7 +72,8 @@ struct State {
     GThread* main = nullptr;
     uint64_t next_seq = 1;
     int scheduler_disabled = 0;
-    int irq_depth = 0;  // > 0 while an alarm handler runs
+    int irq_depth = 0;  // > 0 while an interrupt handler (alarm, VI retrace) runs
+    bool retrace_armed = false;  // the guest registered a handler for the VI interrupt
     std::vector<AlarmRec> alarms;
     int live_hosts = 0;
     std::condition_variable hosts_cv;
@@ -86,6 +88,18 @@ State& S() {
 
 // Interrupt state of the running guest thread (each guest thread is a host thread).
 thread_local bool t_int_enabled = true;
+// The guest thread this host thread runs (null for host threads that are not guest threads), and how many
+// scheduler operations it is inside of: the periodic poll in Memory::translate must not re-enter those.
+thread_local GThread* t_guest = nullptr;
+thread_local int t_busy = 0;
+
+// Earliest moment an interrupt source (an alarm, the VI retrace) comes due, in Clock nanoseconds; read without
+// the lock by poll(). Updated by update_deadline() whenever alarms or the retrace source change.
+constexpr int64_t kNoDeadline = INT64_MAX;
+std::atomic<int64_t> g_deadline{kNoDeadline};
+
+int64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
+int64_t to_ns(Clock::time_point t) { return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count(); }
 
 // ---- Guest memory lists --------------------------------------------------------------------------------
 // Queues are {head, tail} pairs; nodes carry next/prev pointers at the given offsets.
@@ -173,7 +187,6 @@ GThread* pick() {
 
 void make_ready(GThread& t) {
     t.waiting = false;
-    t.timed = false;
     if (runnable(t)) t.seq = S().next_seq++;
 }
 
@@ -185,33 +198,48 @@ void switch_to(GThread* next) {
     next->cv.notify_one();
 }
 
-// ---- Alarms and timed sleeps -----------------------------------------------------------------------------
+// ---- Interrupts: alarms (the decrementer) and the VI retrace -------------------------------------------------
 
-void wake_timed() {
-    auto now = Clock::now();
-    for (auto& [addr, t] : S().threads)
-        if (t->waiting && t->timed && t->wake_at <= now) make_ready(*t);
+// Recomputes g_deadline: the earliest alarm, or the next retrace if the guest registered its handler.
+void update_deadline() {
+    State& s = S();
+    int64_t d = kNoDeadline;
+    for (auto& a : s.alarms) d = std::min(d, to_ns(deadline_for(a.fire)));
+    if (s.retrace_armed && vi::retrace_timer().started()) d = std::min(d, to_ns(vi::retrace_timer().next()));
+    g_deadline.store(d, std::memory_order_relaxed);
 }
 
-void run_alarm_handler(Lock& lk, const AlarmRec& a) {
+// Runs an interrupt handler on the running guest thread, as the exception entry would: with a copy of the
+// interrupted registers, a stack frame below the interrupted one, interrupts masked and no thread switch until the
+// handler returns (threads it makes ready run afterwards, when the interrupted thread reschedules).
+// `r3` and `r4` are the handler's arguments; `before` and `after` run in the same interrupt context.
+template <class Before, class After>
+void run_interrupt(Lock& lk, uint32_t handler, uint32_t r3, uint32_t r4, Before before, After after) {
     State& s = S();
     GThread* self = s.cur;
     PPCContext c;
     if (self->ctx) c = *self->ctx;
     else c.reset();
     c.r[1] = (c.r[1] - kAlarmStackGap) & ~0xFu;
-    c.r[3] = a.addr;
-    c.r[4] = self->addr;  // the interrupted context (the context is at offset 0 of the thread)
+    c.r[3] = r3;
+    c.r[4] = r4;
     c.lr = 0;
     Memory* mem = s.mem;
     ++s.irq_depth;
     bool saved = t_int_enabled;
     t_int_enabled = false;
     lk.unlock();
-    g_func_table.call(a.handler, &c, mem);
+    before();
+    if (handler) g_func_table.call(handler, &c, mem);
+    after(&c);
     lk.lock();
     t_int_enabled = saved;
     --s.irq_depth;
+}
+
+void run_alarm_handler(Lock& lk, const AlarmRec& a) {
+    // r4: the interrupted context (the context is at offset 0 of the thread).
+    run_interrupt(lk, a.handler, a.addr, S().cur->addr, [] {}, [](PPCContext*) {});
 }
 
 void fire_alarms(Lock& lk) {
@@ -221,7 +249,7 @@ void fire_alarms(Lock& lk) {
         size_t idx = s.alarms.size();
         for (size_t i = 0; i < s.alarms.size(); ++i)
             if (s.alarms[i].fire <= now && (idx == s.alarms.size() || s.alarms[i].fire < s.alarms[idx].fire)) idx = i;
-        if (idx == s.alarms.size()) return;
+        if (idx == s.alarms.size()) break;
         AlarmRec a = s.alarms[idx];
         if (a.period) {
             s.alarms[idx].fire = a.fire + a.period * ((now - a.fire) / a.period + 1);
@@ -232,26 +260,56 @@ void fire_alarms(Lock& lk) {
         }
         run_alarm_handler(lk, a);
     }
+    update_deadline();
 }
 
-// Every thread is blocked: wait for the next alarm or timed sleeper (the idle thread of the real OS).
+uint32_t be32_at(const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
+void put_be32(uint8_t* p, uint32_t v) {
+    p[0] = uint8_t(v >> 24), p[1] = uint8_t(v >> 16), p[2] = uint8_t(v >> 8), p[3] = uint8_t(v);
+}
+
+// The VI retrace: when a field has elapsed, the enabled display interrupts become pending; if the guest has
+// registered its handler and unmasked PI_VI, the handler runs (the SDK's __VIRetraceHandler clears the status
+// bits, calls the retrace callbacks, counts the retrace and wakes VIWaitForRetrace).
+void fire_retrace(Lock& lk) {
+    State& s = S();
+    if (!s.retrace_armed || s.irq_depth) return;
+    vi::RetraceTimer& timer = vi::retrace_timer();
+    if (!timer.take(Clock::now())) return;
+    Memory* mem = s.mem;
+    uint8_t* vi_regs = mem->hw_regs + (vi::kRegBase - Memory::HW_REG_BASE);
+    uint8_t* pi_cause = mem->hw_regs + (vi::kPiRegCause - Memory::HW_REG_BASE);
+    const uint8_t* pi_mask = mem->hw_regs + (vi::kPiRegMask - Memory::HW_REG_BASE);
+    uint32_t handler = g_interrupts.handlers[vi::kRetraceInterrupt];
+    bool raised = vi::raise_display_interrupts(vi_regs);
+    if (raised) put_be32(pi_cause, be32_at(pi_cause) | vi::kPiCauseVi);
+    bool deliver = raised && handler && (be32_at(pi_mask) & vi::kPiCauseVi);
+    run_interrupt(
+        lk, deliver ? handler : 0, vi::kRetraceInterrupt, s.cur->addr,
+        [] {
+            if (g_retrace_hook) g_retrace_hook();  // the host's window events
+        },
+        [&](PPCContext* c) {
+            // Asynchronous memory card operations complete from an interrupt as well.
+            if (deliver) card_run_pending_callbacks(c, mem);
+        });
+    if (!vi::display_interrupt_pending(vi_regs)) put_be32(pi_cause, be32_at(pi_cause) & ~vi::kPiCauseVi);
+    update_deadline();
+}
+
+// Every thread is blocked: wait for the next alarm or retrace (the idle thread of the real OS).
 void idle_wait(Lock& lk, GThread* self) {
     State& s = S();
-    bool have = false;
+    int64_t d = g_deadline.load(std::memory_order_relaxed);
     Clock::time_point until;
-    auto consider = [&](Clock::time_point t) {
-        if (!have || t < until) until = t;
-        have = true;
-    };
-    for (auto& a : s.alarms) consider(deadline_for(a.fire));
-    for (auto& [addr, t] : s.threads)
-        if (t->waiting && t->timed) consider(t->wake_at);
-    if (!have) {
+    if (d == kNoDeadline) {
         if (!s.deadlock_reported) {
             s.deadlock_reported = true;
             std::fprintf(stderr, "[sched] every guest thread is blocked and no alarm is pending\n");
         }
         until = Clock::now() + std::chrono::milliseconds(50);
+    } else {
+        until = Clock::time_point(std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(d)));
     }
     self->cv.wait_until(lk, until, [&] { return self->killed; });
     if (self->killed) throw Killed{};
@@ -264,11 +322,11 @@ void idle_wait(Lock& lk, GThread* self) {
 void reschedule(Lock& lk) {
     State& s = S();
     GThread* self = s.cur;
-    if (s.irq_depth) return;  // an alarm handler: the interrupted thread is rescheduled afterwards
+    if (s.irq_depth) return;  // an interrupt handler: the interrupted thread is rescheduled afterwards
     for (;;) {
         if (self->killed) throw Killed{};
-        wake_timed();
         if (!runnable(*self) || t_int_enabled) {
+            fire_retrace(lk);
             fire_alarms(lk);
             if (self->killed) throw Killed{};
         }
@@ -293,7 +351,6 @@ void reschedule(Lock& lk) {
 void sleep_on(Lock& lk, uint32_t queue) {
     State& s = S();
     s.cur->waiting = true;
-    s.cur->timed = false;
     tq_enqueue(s.mem, queue, s.cur->addr);
     reschedule(lk);
 }
@@ -351,6 +408,7 @@ void init_main(Memory* mem) {
     t->seq = s.next_seq++;
     s.cur = s.main = t.get();
     s.threads[t->addr] = t;
+    t_guest = t.get();
 }
 
 // Holds the scheduler lock for the duration of one API call and keeps the guest's thread states in sync.
@@ -361,8 +419,10 @@ struct Op {
         if (!s.cur) init_main(mem);
         s.mem = mem;
         if (s.irq_depth == 0) s.cur->ctx = ctx;
+        ++t_busy;
     }
     ~Op() {
+        --t_busy;
         if (!std::uncaught_exceptions()) sync_all();
     }
 };
@@ -406,6 +466,7 @@ void thread_main(std::shared_ptr<GThread> t) {
             t->cv.wait(lk, [&] { return s.cur == t.get() || t->killed; });
             if (t->killed) throw Killed{};
             mem = s.mem;
+            t_guest = t.get();
             c.r[1] = t->sp;
             c.r[2] = t->r2;
             c.r[13] = t->r13;
@@ -507,33 +568,30 @@ bool interrupts_exchange(bool enabled) {
 
 bool interrupts_enabled() { return t_int_enabled; }
 
-void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds) {
-    Op op(ctx, mem);
-    State& s = S();
-    GThread* self = s.cur;
-    self->waiting = true;
-    self->timed = true;
-    self->wake_at = Clock::now() + std::chrono::microseconds(microseconds);
-    reschedule(op.lk);
+void retrace_arm() {
+    Lock lk(S().m);
+    S().retrace_armed = true;
+    vi::retrace_timer().start(Clock::now());
+    update_deadline();
 }
 
+uint64_t retrace_count() { return vi::retrace_timer().count(); }
+
 void poll(PPCContext* ctx, Memory* mem) {
-    // Stands in for the decrementer and VI retrace interrupts that preempt a thread spinning on a
-    // condition another thread (or an alarm) has to establish. Called from the calls such loops make.
-    thread_local uint32_t calls = 0;
-    if ((++calls & 63) != 0) return;
-    if (!t_int_enabled) return;
+    // The decrementer and the VI retrace are timers that interrupt whatever runs. Interrupts cannot preempt
+    // recompiled code, so they are taken at the calls a spinning loop makes (and every 256K memory operations,
+    // see Memory::translate): when the earliest deadline has passed and the thread has interrupts enabled.
+    if (g_deadline.load(std::memory_order_relaxed) == kNoDeadline) return;
+    if (now_ns() < g_deadline.load(std::memory_order_relaxed)) return;
+    if (!t_int_enabled || t_busy) return;
+    if (!ctx) {
+        if (!t_guest) return;
+        ctx = t_guest->ctx;
+        if (!ctx) return;
+    }
     Op op(ctx, mem);
-    State& s = S();
-    if (s.irq_depth || s.scheduler_disabled > 0) return;
-    auto now = Clock::now();
-    uint64_t ticks = timebase_now();
-    bool due = false;
-    for (auto& [addr, t] : s.threads)
-        if (t->waiting && t->timed && t->wake_at <= now) due = true;
-    for (auto& a : s.alarms)
-        if (a.fire <= ticks) due = true;
-    if (due) reschedule(op.lk);
+    if (S().irq_depth) return;
+    reschedule(op.lk);
 }
 
 void reset() {
@@ -547,7 +605,12 @@ void reset() {
     s.hosts_cv.wait(lk, [&] { return s.live_hosts == 0; });
     s.threads.clear();
     s.alarms.clear();
+    s.retrace_armed = false;
+    vi::retrace_timer().reset();
+    update_deadline();
     s.cur = s.main = nullptr;
+    t_guest = nullptr;
+    t_busy = 0;
     s.scheduler_disabled = 0;
     s.irq_depth = 0;
     s.next_seq = 1;
@@ -901,6 +964,7 @@ void arm_alarm(Memory* mem, uint32_t alarm, uint64_t fire, uint64_t period, uint
     s.alarms.erase(std::remove_if(s.alarms.begin(), s.alarms.end(), [&](const AlarmRec& a) { return a.addr == alarm; }),
                    s.alarms.end());
     s.alarms.push_back({alarm, fire, period, handler});
+    update_deadline();
     mem->write32(alarm + alarm_off::HANDLER, handler);
     mem->write64(alarm + alarm_off::FIRE, fire);
     mem->write64(alarm + alarm_off::PERIOD, period);
@@ -935,6 +999,7 @@ void os_cancel_alarm(PPCContext* ctx, Memory* mem) {
     uint32_t a = ctx->r[3];
     s.alarms.erase(std::remove_if(s.alarms.begin(), s.alarms.end(), [&](const AlarmRec& r) { return r.addr == a; }),
                    s.alarms.end());
+    update_deadline();
     mem->write32(a + alarm_off::HANDLER, 0);
 }
 

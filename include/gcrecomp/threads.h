@@ -11,13 +11,15 @@
 //
 // Switch points: the blocking calls (OSSleepThread, OSSuspendThread, OSJoinThread, OSLockMutex,
 // OSReceiveMessage, ...), the calls that make another thread ready (OSResumeThread, OSWakeupThread,
-// OSSetThreadPriority, OSUnlockMutex, OSSendMessage, ...), OSYieldThread, OSExitThread, and
-// VIWaitForRetrace. A thread that never reaches one of them is not preempted (there is no decrementer
-// interrupt), except through poll(), which the calls a spin loop makes (OSGetTime, DVDGetDriveStatus,
-// OSEnableInterrupts, ...) use to run a sleeper or alarm that has come due.
+// OSSetThreadPriority, OSUnlockMutex, OSSendMessage, ...), OSYieldThread and OSExitThread. There is no time
+// slicing (the real OS has none either): a running thread keeps the baton until it reaches one of them.
 //
-// Alarms (OSSetAlarm, ...) are driven by the timebase and their handlers run at a switch point, or while
-// every thread is blocked. A running thread with interrupts disabled does not get them delivered.
+// Interrupts: two timer sources interrupt the running thread when they come due, provided it has interrupts
+// enabled: the alarms (OSSetAlarm, ..., the decrementer) and the VI retrace, a 59.94 Hz wall-clock source that
+// raises the enabled display interrupts and runs the handler the game registered for OS interrupt 24 (see vi.h).
+// They are taken at poll() points (the calls a spinning loop makes, and every 256K memory operations), at the
+// scheduler's switch points, and while every thread is blocked (the idle thread of the real OS). A handler runs
+// without thread switches; the threads it makes ready run when the interrupted thread reschedules.
 //
 // The thread, mutex, condition and message-queue structures stay in guest memory in the SDK's layout
 // (see hw/os_defs.h); the recompiled SDK code that is not replaced can read and link them.
@@ -39,11 +41,17 @@ bool interrupts_exchange(bool enabled);
 // The current guest thread's interrupt state, without changing it.
 bool interrupts_enabled();
 
-// VIWaitForRetrace's wait: the calling guest thread sleeps `microseconds` while the others run.
-void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds);
+// Starts delivering the VI retrace interrupt: called when the guest registers its handler for OS interrupt 24
+// (__OSSetInterruptHandler). The field clock starts here, unless a read of the beam position started it.
+void retrace_arm();
 
-// Lets the scheduler run a timed sleeper or alarm that has come due while the calling thread spins
-// (no decrementer interrupt exists). Cheap: acts on one call in 64, and not with interrupts disabled.
+// Retraces taken so far (the clock ticks; whether a handler ran depends on the guest's interrupt masks).
+uint64_t retrace_count();
+
+// A safe point: takes the interrupts that have come due (runs the alarm handlers and the retrace handler, then
+// lets a higher-priority thread they made ready run). Cheap when nothing is due: one clock read. Does nothing
+// while the calling thread has interrupts disabled, or inside a scheduler call or interrupt handler.
+// `ctx` is the caller's context; null uses the running guest thread's own (for Memory::translate, which has none).
 void poll(PPCContext* ctx, Memory* mem);
 
 // Forget every guest thread, mutex waiter and alarm (cancelling the host threads). The calling host

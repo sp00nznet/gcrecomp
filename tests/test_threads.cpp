@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Guest-thread scheduler tests. The guest threads are synthetic RecompiledFuncs that call the same
+// Guest-thread scheduler, alarm and VI retrace interrupt tests. The guest threads are synthetic RecompiledFuncs that call the same
 // replacement functions the recompiled SDK code reaches; only one guest thread runs at a time, so the
 // event log needs no locking and its order is deterministic.
 #include <chrono>
@@ -13,8 +13,10 @@
 
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
+#include "gcrecomp/interrupts.h"
 #include "gcrecomp/runtime.h"
 #include "gcrecomp/threads.h"
+#include "gcrecomp/vi.h"
 
 using namespace gcrecomp;
 using namespace gcrecomp::os;
@@ -34,7 +36,7 @@ int g_failures = 0;
 constexpr uint32_t kMain = 0x80003800;
 constexpr uint32_t kQ1 = 0x80020000, kQ2 = 0x80020010, kMutex = 0x80020100, kMutex2 = 0x80020120;
 constexpr uint32_t kMq = 0x80020200, kMqArray = 0x80020240, kCond = 0x80020300, kAlarm = 0x80020400;
-constexpr uint32_t kFlag = 0x80020500, kOut = 0x80020510;
+constexpr uint32_t kFlag = 0x80020500, kOut = 0x80020510, kAlarm2 = 0x80020420;
 
 uint32_t thread_addr(int i) { return 0x80010000 + i * 0x400; }
 uint32_t stack_top(int i) { return 0x80500000 + (i + 1) * 0x10000; }
@@ -68,6 +70,10 @@ void setup() {
     g_mem.write32(kMain + thread_off::BASE_PRIORITY, 16);
     g_main_ctx.reset();
     g_main_ctx.r[1] = 0x80480000;
+    // No VI/PI state, and no handler for the retrace interrupt, from an earlier test.
+    std::memset(g_mem.hw_regs + (vi::kRegBase - Memory::HW_REG_BASE), 0, 0x100);
+    std::memset(g_mem.hw_regs + (vi::kPiRegCause - Memory::HW_REG_BASE), 0, 0x10);
+    g_interrupts.handlers[vi::kRetraceInterrupt] = 0;
 }
 
 uint32_t call(PPCContext* c, RecompiledFunc fn, uint32_t a0 = 0, uint32_t a1 = 0, uint32_t a2 = 0, uint32_t a3 = 0,
@@ -344,6 +350,15 @@ uint32_t reg_func(RecompiledFunc fn) {
     return f;
 }
 
+void alarm_wake_q2(PPCContext* c, Memory*) { call(c, sched::os_wakeup_thread, kQ2); }
+
+// The calling thread sleeps for `ms` (an alarm wakes it) while the other threads and alarms run.
+void sleep_ms(PPCContext* c, int ms) {
+    c->r[3] = kAlarm2, c->r[4] = 0, c->r[5] = uint32_t(ms * (hw::TIMEBASE_FREQ_HZ / 1000)), c->r[6] = reg_func(alarm_wake_q2);
+    sched::os_set_alarm(c, &g_mem);
+    call(c, sched::os_sleep_thread, kQ2);
+}
+
 void test_alarm_wakes_sleeper() {
     setup();
     g_alarm_calls = 0;
@@ -393,18 +408,18 @@ void test_alarm_cancel_and_periodic() {
     c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = hw::TIMEBASE_FREQ_HZ / 1000, c->r[6] = reg_func(alarm_count);
     sched::os_set_alarm(c, &g_mem);
     call(c, sched::os_cancel_alarm, kAlarm);
-    sched::retrace_wait(c, &g_mem, 5000);
+    sleep_ms(c, 5);
     CHECK(g_alarm_calls == 0);
 
     uint64_t now = sched::timebase_now(), period = hw::TIMEBASE_FREQ_HZ / 1000;  // every 1 ms
     c->r[3] = kAlarm, c->r[4] = (uint32_t)(now >> 32), c->r[5] = (uint32_t)now;
     c->r[6] = 0, c->r[7] = (uint32_t)period, c->r[8] = reg_func(alarm_count);
     sched::os_set_periodic_alarm(c, &g_mem);
-    sched::retrace_wait(c, &g_mem, 20000);
+    sleep_ms(c, 20);
     int calls = g_alarm_calls;
     CHECK(calls >= 5 && calls <= 21);
     call(c, sched::os_cancel_alarm, kAlarm);
-    sched::retrace_wait(c, &g_mem, 3000);
+    sleep_ms(c, 3);
     CHECK(g_alarm_calls == calls);
 }
 
@@ -426,46 +441,255 @@ void test_alarm_waits_for_interrupts() {
 
 // ---- Misc ------------------------------------------------------------------------------------------------
 
-void fn_retrace_low(PPCContext* c, Memory*) { LOG("L"); c->r[3] = 0; }
+// ---- Equal priorities are not time-sliced ------------------------------------------------------------------
 
-void test_retrace_wait_runs_other_threads() {
+void fn_log_e(PPCContext* c, Memory*) { LOG("E"); c->r[3] = 0; }
+
+// The real OS has no time slicing: a ready thread of the same priority runs only once the running one blocks,
+// however long the running one spins (and however many interrupts it takes meanwhile).
+void test_no_time_slicing() {
     setup();
+    g_alarm_calls = 0;
     PPCContext* c = &g_main_ctx;
-    uint32_t l = create(c, 1, fn_retrace_low, 0, 30);
-    call(c, sched::os_resume_thread, l);
-    LOG("M1");
+    uint32_t e = create(c, 1, fn_log_e, 0, 16);  // same priority as main
+    call(c, sched::os_resume_thread, e);
+    c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = hw::TIMEBASE_FREQ_HZ / 1000, c->r[6] = reg_func(alarm_count);
+    sched::os_set_alarm(c, &g_mem);
     auto t0 = std::chrono::steady_clock::now();
-    sched::retrace_wait(c, &g_mem, 3000);
-    CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::microseconds(2900));
-    LOG("M2");
-    CHECK(log_is({"M1", "L", "M2"}));
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(20)) sched::poll(c, &g_mem);
+    CHECK(g_alarm_calls == 1);  // the interrupt was taken...
+    CHECK(g_log.empty());       // ...and did not hand the baton to the peer
+    sleep_ms(c, 1);
+    CHECK(log_is({"E"}));
 }
 
-void fn_retrace_high(PPCContext* c, Memory*) {
+// ---- Alarms and sleepers that come due while a thread spins -------------------------------------------------
+
+void fn_sleeper_h(PPCContext* c, Memory*) {
     LOG("H1");
-    sched::retrace_wait(c, &g_mem, 2000);
+    call(c, sched::os_sleep_thread, kQ1);
     LOG("H2");
     c->r[3] = 0;
 }
 
-// A thread that spins (the ADX wait loop) is preempted by a sleeper whose time has come once it polls.
-void test_poll_preempts_spinning_thread() {
+// A thread that spins (the ADX wait loop) takes the alarm interrupt at its next poll point, and the
+// higher-priority thread the handler wakes runs at once.
+void test_alarm_interrupts_spinning_thread() {
     setup();
+    g_alarm_calls = 0;
     PPCContext* c = &g_main_ctx;
-    uint32_t h = create(c, 1, fn_retrace_high, 0, 5);
+    uint32_t h = create(c, 1, fn_sleeper_h, 0, 5);
     call(c, sched::os_resume_thread, h);  // H1, then it sleeps
+    c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = 2 * (hw::TIMEBASE_FREQ_HZ / 1000), c->r[6] = reg_func(alarm_wake_q1);
+    sched::os_set_alarm(c, &g_mem);
     auto t0 = std::chrono::steady_clock::now();
-    while (g_log.size() < 2 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) sched::poll(c, &g_mem);
-    CHECK(log_is({"H1", "H2"}));
-    // Not with interrupts disabled, nor with the scheduler disabled.
-    uint32_t h2 = create(c, 2, fn_retrace_high, 0, 5);
+    while (g_log.size() < 3 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) sched::poll(c, &g_mem);
+    CHECK(log_is({"H1", "alarm", "H2"}));
+
+    // Not with interrupts disabled.
     g_log.clear();
+    uint32_t h2 = create(c, 2, fn_sleeper_h, 0, 5);
     call(c, sched::os_resume_thread, h2);
+    c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = hw::TIMEBASE_FREQ_HZ / 1000, c->r[6] = reg_func(alarm_wake_q1);
+    sched::os_set_alarm(c, &g_mem);
     sched::interrupts_exchange(false);
     t0 = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(20)) sched::poll(c, &g_mem);
     CHECK(log_is({"H1"}));
     sched::interrupts_exchange(true);
+}
+
+// The poll point that has no context of its own: Memory::translate takes the interrupts every 256K memory
+// operations, so a loop that only reads memory is interrupted too.
+void test_alarm_interrupts_memory_loop() {
+    setup();
+    g_alarm_calls = 0;
+    PPCContext* c = &g_main_ctx;
+    call(c, sched::os_get_current_thread);  // the first call makes the main thread a guest thread
+    c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = hw::TIMEBASE_FREQ_HZ / 1000, c->r[6] = reg_func(alarm_count);
+    sched::os_set_alarm(c, &g_mem);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    uint32_t sink = 0;
+    for (int i = 0; i < (1 << 20) && g_alarm_calls == 0; ++i) sink += g_mem.read32(kFlag);
+    CHECK(g_alarm_calls == 1);
+    CHECK(sink == 0);
+    // With interrupts disabled the same loop is not interrupted.
+    g_alarm_calls = 0;
+    c->r[3] = kAlarm, c->r[4] = 0, c->r[5] = hw::TIMEBASE_FREQ_HZ / 1000, c->r[6] = reg_func(alarm_count);
+    sched::os_set_alarm(c, &g_mem);
+    sched::interrupts_exchange(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    for (int i = 0; i < (1 << 20); ++i) sink += g_mem.read32(kFlag);
+    CHECK(g_alarm_calls == 0);
+    sched::interrupts_exchange(true);
+    call(c, sched::os_cancel_alarm, kAlarm);
+}
+
+// ---- VI retrace --------------------------------------------------------------------------------------------
+
+constexpr uint32_t kViDispInt0 = vi::kRegBase + vi::kRegDispInt0;
+int g_retraces = 0;
+uint32_t g_retrace_arg = 0, g_retrace_status = 0;
+
+// A stand-in for __VIRetraceHandler: reads DISP_INT0, clears its status bit, counts, wakes the threads on kQ1.
+void retrace_handler(PPCContext* c, Memory*) {
+    ++g_retraces;
+    g_retrace_arg = c->r[3];
+    uint32_t v = g_mem.read32(kViDispInt0);
+    g_retrace_status = v;
+    if (v & vi::kDispIntInt) g_mem.write32(kViDispInt0, v & ~vi::kDispIntInt);
+    call(c, sched::os_wakeup_thread, kQ1);
+}
+
+// What the game's VIInit leaves behind: DISP_INT0 enabled, handler 24 registered, PI_VI unmasked.
+void setup_retrace(bool unmask = true) {
+    setup();
+    g_retraces = 0;
+    g_retrace_arg = g_retrace_status = 0;
+    g_mem.write32(kViDispInt0, vi::kDispIntEnb);
+    g_mem.write32(vi::kPiRegMask, unmask ? vi::kPiCauseVi : 0);
+    g_interrupts.handlers[vi::kRetraceInterrupt] = reg_func(retrace_handler);
+    sched::retrace_arm();
+}
+
+// VIWaitForRetrace: the thread sleeps on the retrace queue and the retrace handler wakes it, one field later.
+void test_retrace_interrupt_wakes_waiter() {
+    setup_retrace();
+    PPCContext* c = &g_main_ctx;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) call(c, sched::os_sleep_thread, kQ1);  // every thread blocked: the idle wait takes it
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    CHECK(g_retraces == 3);
+    CHECK(g_retrace_arg == vi::kRetraceInterrupt);
+    CHECK(g_retrace_status & vi::kDispIntInt);  // the handler saw a pending interrupt...
+    CHECK(g_retrace_status & vi::kDispIntEnb);
+    CHECK(!(g_mem.read32(kViDispInt0) & vi::kDispIntInt));  // ...and cleared it
+    CHECK(!(g_mem.read32(vi::kPiRegCause) & vi::kPiCauseVi));
+    CHECK(sched::retrace_count() == 3);
+    // Three fields at 59.94 Hz: 50 ms, give or take the host's scheduling.
+    CHECK(elapsed >= std::chrono::milliseconds(48));
+    CHECK(elapsed < std::chrono::milliseconds(150));
+    CHECK(sched::interrupts_enabled());  // the handler's masked state does not leak out
+}
+
+// No handler registered, or PI_VI masked: the retrace clock runs, nothing is delivered, and the status stays pending.
+void test_retrace_masked_or_unregistered() {
+    setup_retrace(false);
+    PPCContext* c = &g_main_ctx;
+    sleep_ms(c, 40);
+    CHECK(g_retraces == 0);
+    CHECK(sched::retrace_count() >= 2);
+    CHECK(g_mem.read32(kViDispInt0) & vi::kDispIntInt);
+    g_mem.write32(vi::kPiRegMask, vi::kPiCauseVi);  // __OSUnmaskInterrupts(PI_VI)
+    sleep_ms(c, 20);
+    CHECK(g_retraces >= 1);
+    CHECK(!(g_mem.read32(kViDispInt0) & vi::kDispIntInt));
+
+    setup();  // a display interrupt that is not enabled raises nothing
+    g_interrupts.handlers[vi::kRetraceInterrupt] = reg_func(retrace_handler);
+    g_retraces = 0;
+    g_mem.write32(vi::kPiRegMask, vi::kPiCauseVi);
+    sched::retrace_arm();
+    sleep_ms(c, 40);
+    CHECK(g_retraces == 0);
+}
+
+void fn_retrace_waiter(PPCContext* c, Memory*) {
+    LOG("W1");
+    call(c, sched::os_sleep_thread, kQ1);
+    LOG("W2");
+    c->r[3] = 0;
+}
+
+// A thread spinning in a loop that only reads memory takes the retrace interrupt, and the higher-priority thread
+// blocked in VIWaitForRetrace (the handler wakes it) runs without the spinner reaching any OS call.
+void test_retrace_interrupts_spinning_thread() {
+    setup_retrace();
+    PPCContext* c = &g_main_ctx;
+    call(c, sched::os_get_current_thread);
+    uint32_t w = create(c, 1, fn_retrace_waiter, 0, 5);
+    call(c, sched::os_resume_thread, w);  // W1, then it sleeps
+    auto t0 = std::chrono::steady_clock::now();
+    uint32_t sink = 0;
+    while (g_log.size() < 2 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2))
+        for (int i = 0; i < 4096; ++i) sink += g_mem.read32(kFlag);
+    CHECK(log_is({"W1", "W2"}));
+    CHECK(g_retraces == 1);
+    CHECK(sink == 0);
+
+    // With interrupts disabled the retrace stays pending.
+    g_log.clear();
+    g_retraces = 0;
+    uint32_t w2 = create(c, 2, fn_retrace_waiter, 0, 5);
+    call(c, sched::os_resume_thread, w2);
+    sched::interrupts_exchange(false);
+    t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(40))
+        for (int i = 0; i < 4096; ++i) sink += g_mem.read32(kFlag);
+    CHECK(log_is({"W1"}));
+    CHECK(g_retraces == 0);
+    sched::interrupts_exchange(true);
+    sleep_ms(c, 30);  // the next retrace wakes it
+    CHECK(log_is({"W1", "W2"}));
+}
+
+// ---- The retrace clock and the display interrupt registers (no scheduler, no display) --------------------------
+
+void test_retrace_timer_model() {
+    using Clock = vi::RetraceTimer::Clock;
+    const auto p = vi::kFieldPeriod;
+    CHECK(std::chrono::duration<double>(p).count() > 1.0 / 59.95 && std::chrono::duration<double>(p).count() < 1.0 / 59.93);
+    vi::RetraceTimer t;
+    auto t0 = Clock::now();
+    CHECK(!t.started() && !t.due(t0 + 10 * p) && !t.take(t0 + 10 * p));
+    t.start(t0);
+    t.start(t0 + 3 * p);  // idempotent
+    CHECK(t.next() == t0 + p);
+    CHECK(!t.take(t0 + p - std::chrono::nanoseconds(1)));
+    CHECK(t.take(t0 + p));
+    CHECK(t.next() == t0 + 2 * p && t.count() == 1);
+    // A host that fell behind loses the retraces it missed: one is taken, the field restarts on the boundary.
+    CHECK(t.take(t0 + 5 * p + p / 2));
+    CHECK(!t.take(t0 + 5 * p + p / 2));
+    CHECK(t.next() == t0 + 6 * p && t.count() == 2);
+    // The beam sweeps the field: line 1 at the retrace, the last line just before the next one.
+    auto b0 = t.beam(t0 + 5 * p);
+    auto bm = t.beam(t0 + 5 * p + p / 2);
+    auto be = t.beam(t0 + 6 * p - std::chrono::nanoseconds(1000));
+    CHECK(b0.vcount == 1 && b0.hcount == 1);
+    CHECK(bm.vcount >= vi::kLinesPerField / 2 - 1 && bm.vcount <= vi::kLinesPerField / 2 + 2);
+    CHECK(be.vcount == vi::kLinesPerField);
+    CHECK(be.hcount >= 1 && be.hcount <= vi::kHalfLinesPerLine);
+    t.reset();
+    CHECK(!t.started() && t.count() == 0);
+}
+
+void test_display_interrupt_registers() {
+    uint8_t regs[0x100] = {};
+    auto rd = [&](uint32_t off) {
+        return (uint32_t(regs[off]) << 24) | (uint32_t(regs[off + 1]) << 16) | (uint32_t(regs[off + 2]) << 8) | regs[off + 3];
+    };
+    auto wr = [&](uint32_t off, uint32_t v) {
+        regs[off] = uint8_t(v >> 24), regs[off + 1] = uint8_t(v >> 16), regs[off + 2] = uint8_t(v >> 8), regs[off + 3] = uint8_t(v);
+    };
+    CHECK(!vi::raise_display_interrupts(regs));  // nothing enabled
+    CHECK(rd(vi::kRegDispInt0) == 0);
+    wr(vi::kRegDispInt0, vi::kDispIntEnb | 0x00E0012C);  // enabled, with a position
+    wr(vi::kRegDispInt0 + 4, 0x00F00000);                 // DI1 not enabled
+    CHECK(!vi::display_interrupt_pending(regs));
+    CHECK(vi::raise_display_interrupts(regs));
+    CHECK(rd(vi::kRegDispInt0) == (vi::kDispIntInt | vi::kDispIntEnb | 0x00E0012C));  // position untouched
+    CHECK(rd(vi::kRegDispInt0 + 4) == 0x00F00000);
+    CHECK((regs[vi::kRegDispInt0] & 0x80) != 0);  // the SDK reads the high half-word: bit 15 is the status
+    wr(vi::kRegDispInt0, rd(vi::kRegDispInt0) & ~vi::kDispIntInt);  // what the handler does
+    CHECK(!vi::display_interrupt_pending(regs));
+    // Registers 2 and 3 (light pen) are never raised by the retrace.
+    wr(vi::kRegDispInt0, 0);
+    wr(vi::kRegDispInt0 + 8, vi::kDispIntEnb);
+    CHECK(!vi::raise_display_interrupts(regs));
+    CHECK(rd(vi::kRegDispInt0 + 8) == vi::kDispIntEnb);
+    vi::write_beam(regs, {0x0123, 0x0345});
+    CHECK(rd(vi::kRegVertCount) == 0x01230345);
 }
 
 void fn_int_state(PPCContext* c, Memory*) {
@@ -540,8 +764,14 @@ int main() {
         {"alarm_wakes_thread_which_wakes_main", test_alarm_wakes_thread_which_wakes_main},
         {"alarm_cancel_and_periodic", test_alarm_cancel_and_periodic},
         {"alarm_waits_for_interrupts", test_alarm_waits_for_interrupts},
-        {"retrace_wait_runs_other_threads", test_retrace_wait_runs_other_threads},
-        {"poll_preempts_spinning_thread", test_poll_preempts_spinning_thread},
+        {"no_time_slicing", test_no_time_slicing},
+        {"alarm_interrupts_spinning_thread", test_alarm_interrupts_spinning_thread},
+        {"alarm_interrupts_memory_loop", test_alarm_interrupts_memory_loop},
+        {"retrace_timer_model", test_retrace_timer_model},
+        {"display_interrupt_registers", test_display_interrupt_registers},
+        {"retrace_interrupt_wakes_waiter", test_retrace_interrupt_wakes_waiter},
+        {"retrace_masked_or_unregistered", test_retrace_masked_or_unregistered},
+        {"retrace_interrupts_spinning_thread", test_retrace_interrupts_spinning_thread},
         {"interrupt_state_is_per_thread", test_interrupt_state_is_per_thread},
         {"detached_exit", test_detached_exit},
         {"suspend_keeps_woken_thread_off", test_suspend_keeps_woken_thread_off},

@@ -32,6 +32,7 @@
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
 #include "gcrecomp/threads.h"
+#include "gcrecomp/vi.h"
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -116,11 +117,12 @@ static void deliver_interrupts(PPCContext* ctx, Memory* mem) {
 }
 
 // __OSSetInterruptHandler(OSInterruptType type, OSInterruptHandler handler) -> previous handler.
-// The handlers are kept in g_interrupts, where the DSP device (and the VI scheduler) find them.
+// The handlers are kept in g_interrupts, where the DSP device and the scheduler (VI retrace) find them.
 static void os_set_interrupt_handler(PPCContext* ctx, Memory*) {
     const uint32_t id = ctx->r[3];
     const uint32_t previous = id < (uint32_t)InterruptScheduler::MAX_INTR_ID ? g_interrupts.handlers[id] : 0;
     g_interrupts.set_handler((int)id, ctx->r[4]);
+    if (id == vi::kRetraceInterrupt && ctx->r[4]) sched::retrace_arm();  // the VI timer starts raising it
     ctx->r[3] = previous;
 }
 
@@ -940,44 +942,14 @@ void init_low_memory(Memory* mem, const GameConfig& config) {
 }
 
 // =============================================================================
-// Video Interface (VI) HLE
+// Video Interface
 //
-// The GameCube's VI controls video output timing and framebuffer display.
-// VIWaitForRetrace is critical -- without it, the game loop spins at
-// infinite speed and the game hangs waiting for VBlank. We simulate 60Hz
-// timing with a 16.67ms sleep.
-//
-// Reference: libogc ogc/video.h
+// No VI function is replaced: the game's own VIInit/VIConfigure/VIFlush/VIWaitForRetrace/VIGetRetraceCount run
+// on the VI registers, and the retrace they wait for is the interrupt the scheduler raises (see gcrecomp/vi.h and
+// gcrecomp/threads.h).
 // =============================================================================
 
-static uint32_t g_vi_framebuffer = 0;
-static uint32_t g_vi_black = 0;
-static uint32_t g_vi_retrace_count = 0;
-
-static void vi_init(PPCContext* ctx, Memory* mem) {
-    printf("[VI] VIInit\n");
-}
-
-static void vi_configure(PPCContext* ctx, Memory* mem) {
-    printf("[VI] VIConfigure\n");
-}
-
-static void vi_set_next_framebuffer(PPCContext* ctx, Memory* mem) {
-    g_vi_framebuffer = ctx->r[3];
-    printf("[VI] VISetNextFrameBuffer 0x%08X\n", g_vi_framebuffer);
-}
-
-static void vi_flush(PPCContext* ctx, Memory* mem) {
-    printf("[VI] VIFlush\n");
-}
-
-static void vi_set_black(PPCContext* ctx, Memory* mem) {
-    g_vi_black = ctx->r[3];
-    printf("[VI] VISetBlack %d\n", g_vi_black);
-}
-
-// VIWaitForRetrace: sleep ~16.67ms to simulate 60Hz VBlank.
-// Without this the game loop runs at infinite speed and hangs.
+// Called at every VI retrace, on the thread that takes the interrupt (window events are pumped here).
 void (*g_retrace_hook)() = nullptr;
 
 static std::unordered_map<const char*, uint64_t>& hle_counters() {
@@ -995,26 +967,6 @@ void hle_dump(size_t top) {
     std::sort(sorted.rbegin(), sorted.rend());
     for (size_t i = 0; i < sorted.size() && i < top; ++i)
         std::fprintf(stderr, "[hle] %-28s %llu\n", sorted[i].second.c_str(), (unsigned long long)sorted[i].first);
-}
-
-static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
-    g_vi_retrace_count++;
-    if (g_retrace_hook) g_retrace_hook();
-    deliver_interrupts(ctx, mem);
-    card_run_pending_callbacks(ctx, mem);
-    sched::retrace_wait(ctx, mem, 16667);
-}
-
-static void vi_get_retrace_count(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = g_vi_retrace_count;
-}
-
-static void vi_get_tv_format(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = 0; // NTSC
-}
-
-static void vi_get_dtv_status(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = 0;
 }
 
 // =============================================================================
@@ -1133,17 +1085,6 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDClose",               dvd_close },
     { "DVDReadPrio",            dvd_read_prio },
     { "DVDReadAsync",           dvd_read_async },
-
-    // --- Video Interface (VI) ---
-    { "VIInit",                 vi_init },
-    { "VIConfigure",            vi_configure },
-    { "VISetNextFrameBuffer",   vi_set_next_framebuffer },
-    { "VIFlush",                vi_flush },
-    { "VISetBlack",             vi_set_black },
-    { "VIWaitForRetrace",       vi_wait_for_retrace },
-    { "VIGetRetraceCount",      vi_get_retrace_count },
-    { "VIGetTvFormat",          vi_get_tv_format },
-    { "VIGetDTVStatus",         vi_get_dtv_status },
 
     // --- Init Stubs ---
     { "OSInit",                 os_init_stub },

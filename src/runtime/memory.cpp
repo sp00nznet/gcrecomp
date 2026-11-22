@@ -25,6 +25,7 @@
 #include "gcrecomp/interrupts.h"
 #include "gcrecomp/hw/dsp.h"
 #include "gcrecomp/threads.h"
+#include "gcrecomp/vi.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,17 +69,13 @@ uint8_t* Memory::translate(uint32_t addr) {
         fflush(stdout);
     }
 
-    // Interrupt delivery: poll the periodic scheduler every 256K ops.
-    // The scheduler returns early unless its deadline has elapsed, so this
-    // is cheap on the steady-state path. We pass &g_ctx because we don't
-    // have access to the current ctx here — the recompiled code uses
-    // g_ctx directly (see recomp_common.h's using-declarations).
+    // Interrupt delivery: every 256K memory operations the running guest thread takes the interrupts that
+    // have come due (alarms, the VI retrace, the DSP and the AI DMA), as a game spinning on a flag one of
+    // their handlers sets never reaches an OS call. All of them are cheap when nothing is due.
     if ((op_count & 0x3FFFF) == 0) {
-        // A game spinning on a flag its DSP interrupt handler sets never reaches an OS safe point.
-        // The same goes for the audio DMA callback that renders the next AX frame.
+        sched::poll(nullptr, this);
         if (sched::interrupts_enabled()) ai_poll(&g_ctx, this);
         dsp_poll(&g_ctx, this);
-        g_interrupts.tick(&g_ctx, this);
     }
     // Cached region: 0x80000000 - 0x80000000+ram_size
     if (addr >= MAIN_RAM_BASE && addr < ram_end) {
@@ -109,6 +106,12 @@ const uint8_t* Memory::translate(uint32_t addr) const {
     return const_cast<Memory*>(this)->translate(addr);
 }
 
+// The beam position registers (VI_VERT_COUNT / VI_HORIZ_COUNT) follow the retrace clock; refreshed when read.
+static void vi_beam_read(const uint8_t* hw_regs, uint32_t addr) {
+    if (addr >= vi::kRegBase + vi::kRegVertCount && addr < vi::kRegBase + vi::kRegVertCount + 4)
+        vi::refresh_beam(const_cast<uint8_t*>(hw_regs + (vi::kRegBase - Memory::HW_REG_BASE)));
+}
+
 // Big-endian reads (GameCube byte order)
 uint8_t Memory::read8(uint32_t addr) const {
     return *translate(addr);
@@ -137,6 +140,7 @@ uint16_t Memory::read16(uint32_t addr) const {
     }
 
     if (is_dsp_reg(addr)) return (uint16_t)g_dsp.read(addr - DspInterface::kBase, 2);
+    vi_beam_read(hw_regs, addr);
 
     const uint8_t* p = translate(addr);
     return ((uint16_t)p[0] << 8) | p[1];
@@ -144,6 +148,7 @@ uint16_t Memory::read16(uint32_t addr) const {
 
 uint32_t Memory::read32(uint32_t addr) const {
     if (is_dsp_reg(addr)) return g_dsp.read(addr - DspInterface::kBase, 4);
+    vi_beam_read(hw_regs, addr);
     // HW register HLE for reads
     if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
         static std::unordered_map<uint32_t, int> hw_read_count;
@@ -161,35 +166,13 @@ uint32_t Memory::read32(uint32_t addr) const {
             fflush(stdout);
         }
 
-        // PI Interrupt Cause @ 0xCC003000: the OS spins reading this waiting
-        // for interrupts to fire (VI vblank, DI complete, etc.) and to then
-        // be cleared. We don't generate real interrupts and never call the
-        // OS handler, so left alone the register stays zero forever.
-        //
-        // HLE pattern: emit a VI+DI pending pulse periodically — return a
-        // non-zero value once every N reads, then 0 for the rest. The
-        // pulse lets handlers that branch "if any pending" make progress;
-        // the zeros let "wait until cleared" loops exit too.
+        // PI Interrupt Cause @ 0xCC003000: the VI bit is the real one (see threads.cpp); the DI bit stands in for
+        // the DVD interface, which has no device: emit a pending pulse once every N reads.
         if (addr == 0xCC003000) {
             uint8_t* p = const_cast<uint8_t*>(hw_regs + (addr - HW_REG_BASE));
             static uint32_t pi_pulse_tick = 0;
-            uint32_t synth = (++pi_pulse_tick % 64 == 1) ? 0x00000104 : 0;
-            p[0] = (uint8_t)(synth >> 24);
-            p[1] = (uint8_t)(synth >> 16);
-            p[2] = (uint8_t)(synth >> 8);
-            p[3] = (uint8_t)synth;
-        }
-
-        // VI: Simulate advancing half-line counter so VIWaitForRetrace works.
-        // Real VI generates interrupts at vertical blank (line 263/525 for NTSC).
-        // 0xCC002000+0x24 = 0xCC002024 = VI_VCOUNT (vertical beam position)
-        // 0xCC002000+0x2C = 0xCC00202C = VI_DISPLAY_INT0 (retrace match)
-        if (addr == 0xCC002024 || addr == 0xCC00202C) {
-            // Increment line counter to simulate video scan
-            static uint16_t vi_line = 0;
-            vi_line = (vi_line + 1) % 526;
-            uint8_t* p = const_cast<uint8_t*>(hw_regs + (0xCC002024 - HW_REG_BASE));
-            p[0] = 0; p[1] = 0; p[2] = (uint8_t)(vi_line >> 8); p[3] = (uint8_t)vi_line;
+            if (++pi_pulse_tick % 64 == 1) p[3] |= 0x04;
+            else p[3] &= ~0x04;
         }
 
         // SI: Report TCINT (transfer complete) for SI poll commands.

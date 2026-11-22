@@ -310,11 +310,11 @@ extern Memory     g_mem;
 // `size` is 1, 2, 4 or 8 bytes and `value` holds them big-endian.
 extern void (*g_wgp_write)(uint32_t size, uint64_t value);
 
-// Called once per VIWaitForRetrace, on the game's thread (window events are pumped here).
+// Called at every VI retrace, on the thread that takes the interrupt (window events are pumped here).
 extern void (*g_retrace_hook)();
 
 // Delivers the audio interface's pending DMA interrupt (calls the game's AI callback) if it is due. Called at the
-// points where the game could have been interrupted: re-enabling interrupts, retrace waits, clock reads.
+// points where the game could have been interrupted: re-enabling interrupts, clock reads.
 void ai_poll(PPCContext* ctx, Memory* mem);
 
 // Delivers the DSP block's pending ARAM / DSP interrupt (calls the handler the game registered with

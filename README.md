@@ -169,7 +169,7 @@ needs for asset loading.
 | **Disc Image** | mount_disc_image() — FST parsing, raw disc reads | Done |
 | **Yaz0** | Nintendo Yaz0 (SZS) decompression — standard LZ format | Done |
 | **RARC** | RARC archive parser — hierarchical file extraction | Done |
-| **Threads** | Cooperative scheduler, one host thread per guest thread (threads, mutexes, conditions, message queues, alarms; see `gcrecomp/threads.h`) | Done |
+| **Threads** | Cooperative scheduler, one host thread per guest thread (threads, mutexes, conditions, message queues, alarms; no time slicing; see `gcrecomp/threads.h`) | Done |
 | **Interrupts** | OSDisable/Enable/RestoreInterrupts (no-ops in recomp) | Done |
 | **Mutex/MsgQueue** | Init/Lock/Unlock stubs | Done |
 | **Cache** | DCFlush/ICInvalidate (no-ops) | Done |
@@ -177,7 +177,7 @@ needs for asset loading.
 | **Math** | sin/cos/sqrt/atan2/pow/floor/ceil etc. | Done |
 | **Debug** | OSReport/OSPanic/OSFatal | Done |
 | **Low Memory Init** | Boot state: clocks, game ID, arena, console type | Done |
-| **VI** | VIInit/Configure/WaitForRetrace/Flush/SetBlack/GetTvFormat | Done |
+| **VI** | No replacements: the SDK's own VI code runs on modelled registers; a 59.94 Hz wall-clock timer raises the display interrupt (OS interrupt 24) and the game's `__VIRetraceHandler` counts retraces, runs the callbacks and wakes `VIWaitForRetrace` (`gcrecomp/vi.h`, `gcrecomp/threads.h`) | Done |
 | **CARD** | CARDInit/Mount/Open/Read/Write/Create/Delete (host FS backed) | Done |
 | **Init Stubs** | OSInit/DVDInit/PSInit/AIInit/DSPInit/__OSInitSystemCall | Done |
 | **PPC Helpers** | PPC_CNTLZW/ROTL32/MFTBL/MFTBU + PSQ load/store | Done |
@@ -226,8 +226,8 @@ GameCube audio uses a custom DSP with ADPCM compression:
   (`AIInitDMA`, `AIStartDMA`, `AIRegisterDMACallback`, ...) are replaced. The blocks of
   big-endian PCM16 the game programs are converted and played through an `AudioSink`
   (SDL3, or a null sink with `GCRECOMP_AUDIO=null`), and the game's DMA callback runs when a
-  block starts, where the game could have been interrupted (re-enabling interrupts, retrace
-  wait, clock read, every 256K memory operations); the handler runs with interrupts masked and the
+  block starts, where the game could have been interrupted (re-enabling interrupts, clock
+  read, every 256K memory operations); the handler runs with interrupts masked and the
   interrupted code gets its interrupt state back. `AIRegisterDMACallback` must be named in the
   game's symbol map. The AI plays the first 16-bit word of a frame as the right channel. The AX
   microcode fills the blocks (see below). `GCRECOMP_DUMP_AUDIO=file.wav` also writes everything
