@@ -184,4 +184,13 @@ float fog_factor(const FogParams& p, uint32_t z24) {
     }
 }
 
+uint32_t indirect_tev_stages(const uint32_t* bp) {
+    if (((bp[0x00] >> 16) & 7) == 0) return 0;
+    const uint32_t nstages = ((bp[0x00] >> 10) & 0xF) + 1;
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < nstages; ++i)
+        if (bp[0x10 + i] & 0x1FFFFF) mask |= 1u << i;
+    return mask;
+}
+
 }  // namespace gcrecomp::gp

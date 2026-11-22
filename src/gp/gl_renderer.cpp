@@ -46,6 +46,7 @@ int g_shot_count = 0;
 GLuint g_fbo = 0, g_color = 0, g_depth = 0;
 GLuint g_vao = 0, g_vbo = 0, g_program = 0;
 GLuint g_white = 0;
+uint64_t g_indirect_draws = 0;
 
 const char* kVertexShader = R"(#version 330 core
 layout(location = 0) in vec4 a_pos;
@@ -547,6 +548,7 @@ bool init(int window_w, int window_h, const char* screenshot_dir, int max_screen
 }
 
 void shutdown() {
+    if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
     if (g_context) SDL_GL_DestroyContext(g_context);
     if (g_window) SDL_DestroyWindow(g_window);
     g_context = nullptr;
@@ -575,6 +577,21 @@ void draw(const DrawCall& call, const State& s) {
                          f[6], f[7], f[12], f[13], f[14]);
         }
         std::fprintf(stderr, "[GL]   tex0 img0=%06X img3=%06X mode0=%06X\n", s.bp[0x88], s.bp[0x94], s.bp[0x80]);
+    }
+    if (const uint32_t ind = indirect_tev_stages(s.bp)) {
+        // Indirect texturing is not implemented: the draw is rendered as if the stages were direct.
+        // Say which games need it, once per distinct configuration.
+        ++g_indirect_draws;
+        static uint32_t seen[8];
+        static int nseen = 0;
+        const uint32_t sig = ind ^ (((s.bp[0x00] >> 16) & 7) << 16);
+        bool known = false;
+        for (int i = 0; i < nseen; ++i) known |= seen[i] == sig;
+        if (!known && nseen < 8) {
+            seen[nseen++] = sig;
+            std::fprintf(stderr, "[GL] indirect texturing used (draw #%llu): %u indirect stage(s), TEV stages 0x%04X; not implemented, drawn as direct\n",
+                         (unsigned long long)calls, (s.bp[0x00] >> 16) & 7, ind);
+        }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
     apply_state(s);

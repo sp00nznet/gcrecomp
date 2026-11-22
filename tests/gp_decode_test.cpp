@@ -212,6 +212,22 @@ static void test_fog_orthographic() {
     }
 }
 
+static void test_indirect_detection() {
+    uint32_t bp[256] = {};
+    bp[0x00] = (3u << 10);  // four TEV stages, no indirect stages
+    bp[0x11] = 0x1234;      // stale IND_CMD data is ignored without indirect stages
+    CHECK(indirect_tev_stages(bp) == 0);
+    bp[0x00] |= 1u << 16;   // one indirect stage declared
+    CHECK(indirect_tev_stages(bp) == 0x2);
+    bp[0x13] = 3u << 9;     // matrix 3 on stage 3
+    bp[0x14] = 1;           // stage 4 is beyond the stages in use
+    CHECK(indirect_tev_stages(bp) == 0xA);
+    // A directly sampled stage (GXSetTevDirect) writes all zero fields.
+    bp[0x11] = 0;
+    bp[0x13] = 0;
+    CHECK(indirect_tev_stages(bp) == 0);
+}
+
 int main() {
     test_c14x2();
     test_c14x2_out_of_range();
@@ -222,6 +238,7 @@ int main() {
     test_fog_linear_perspective();
     test_fog_types();
     test_fog_orthographic();
+    test_indirect_detection();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

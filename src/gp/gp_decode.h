@@ -88,4 +88,14 @@ FogParams decode_fog(const uint32_t* bp);
 // Fog amount (0 = none, 1 = fully fog colored) for a 24-bit depth value. Mirrors the fragment shader.
 float fog_factor(const FogParams& p, uint32_t z24);
 
+// ---- Indirect texturing -----------------------------------------------------------------------
+//
+// BP 0x06-0x0E (indirect matrices), 0x0F (mask), 0x10-0x1F (IND_CMD of TEV stage 0..15), 0x25-0x27
+// (indirect texture scale and order). A draw is indirect when GENMODE (BP 0x00 bits 16-18) declares
+// indirect stages and a TEV stage in use has a non-zero IND_CMD (GXSetTevDirect writes zero).
+// Not implemented: only detected, so the log tells which game needs it.
+
+// Bit i is set when TEV stage i of the current draw does an indirect lookup (0 when none does).
+uint32_t indirect_tev_stages(const uint32_t* bp);
+
 }  // namespace gcrecomp::gp
