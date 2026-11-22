@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "gcrecomp/gp/gp.h"
 
 namespace gcrecomp::gp {
 
@@ -49,7 +52,19 @@ struct CopyRequest {
     int x, y, w, h;
 };
 
-// Implemented by gl_renderer.cpp.
+// Parser state (gp_parser.cpp). `g_graphics` says whether vertices are decoded and handed to the
+// renderer; without it the parser only tracks state and counters.
+extern State g_state;
+extern Stats g_stats;
+extern uint64_t g_frames;
+extern bool g_graphics;
+
+// Clears the register state, the counters and any half-received command.
+void reset();
+// Feeds bytes of the command stream; a command may be split across calls.
+void feed(const uint8_t* data, size_t n);
+
+// Implemented by gl_renderer.cpp (tests provide a recording one).
 namespace renderer {
 bool init(int window_w, int window_h, const char* screenshot_dir, int max_screenshots);
 void shutdown();

@@ -120,6 +120,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         find_package(OpenGL QUIET)
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
+            src/gp/gp_parser.cpp
             src/gp/lighting.cpp
             src/gp/gl_renderer.cpp
             src/gp/input.cpp
@@ -244,6 +245,11 @@ if(GCRECOMP_BUILD_TESTS)
     target_include_directories(card_image_test PRIVATE src/os)
     add_test(NAME card_image COMMAND card_image_test)
     if(GCRECOMP_BUILD_RUNTIME)
+        # Parser and vertex decoder against a recording renderer: no SDL, GL or disc.
+        add_executable(gp_parser_test tests/gp_parser_test.cpp src/gp/gp_parser.cpp src/gp/lighting.cpp)
+        target_include_directories(gp_parser_test PRIVATE include src/gp)
+        target_link_libraries(gp_parser_test PRIVATE gcrecomp_runtime)
+        add_test(NAME gp_parser COMMAND gp_parser_test)
         add_executable(card_hle_test tests/card_hle_test.cpp)
         target_link_libraries(card_hle_test PRIVATE gcrecomp_runtime)
         add_test(NAME card_hle COMMAND card_hle_test)
