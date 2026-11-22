@@ -2,16 +2,25 @@
 //
 // Controller (PAD) HLE.
 //
-// The SDK's PAD code talks to the serial interface with interrupts. These replacements report one
-// connected controller on port 0 and fill PADStatus from g_pad[0], which the window layer updates
-// from the keyboard each frame.
+// The SDK's PAD code talks to the serial interface with interrupts. These replacements fill PADStatus
+// from g_pad[0..3], which the window layer (src/gp/input.cpp) updates from the keyboard and gamepads
+// each frame, and record rumble requests in g_pad[].rumble for it to forward to the device.
 #include <cstring>
 
 #include "gcrecomp/runtime.h"
 
 namespace gcrecomp {
 
-PadState g_pad[4] = {};
+namespace {
+PadState connected_pad() {
+    PadState s;
+    s.connected = true;
+    return s;
+}
+}  // namespace
+
+// Port 0 reports a controller even before any host device was used; the others when assigned.
+PadState g_pad[4] = {connected_pad(), {}, {}, {}};
 
 namespace {
 
@@ -29,7 +38,7 @@ void pad_read(PPCContext* ctx, Memory* mem) {
     for (uint32_t port = 0; port < 4; ++port) {
         const uint32_t p = status + port * 12;
         const PadState& s = g_pad[port];
-        const bool connected = port == 0;
+        const bool connected = s.connected;
         mem->write16(p, connected ? s.buttons : 0);
         mem->write8(p + 2, connected ? uint8_t(s.stick_x) : 0);
         mem->write8(p + 3, connected ? uint8_t(s.stick_y) : 0);
@@ -45,6 +54,16 @@ void pad_read(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = 0;  // no channel reports an error
 }
 
+// PADControlMotor(s32 chan, u32 command): 0 = stop, 1 = rumble, 2 = stop and brake.
+void set_motor(uint32_t chan, uint32_t command) {
+    if (chan < 4) g_pad[chan].rumble = command == 1;
+}
+void pad_control_motor(PPCContext* ctx, Memory*) { set_motor(ctx->r[3], ctx->r[4]); }
+// PADControlAllMotors(const u32 commands[4])
+void pad_control_all_motors(PPCContext* ctx, Memory* mem) {
+    for (uint32_t chan = 0; chan < 4; ++chan) set_motor(chan, mem->read32(ctx->r[3] + chan * 4));
+}
+
 struct Entry {
     const char* name;
     RecompiledFunc func;
@@ -56,7 +75,8 @@ const Entry kTable[] = {
     {"PADRecalibrate", pad_true},
     {"PADRead", pad_read},
     {"PADSetSpec", pad_nothing},
-    {"PADControlMotor", pad_nothing},
+    {"PADControlMotor", pad_control_motor},
+    {"PADControlAllMotors", pad_control_all_motors},
     {nullptr, nullptr},
 };
 
