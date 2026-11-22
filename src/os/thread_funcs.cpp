@@ -1,23 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
-// Thread scheduler HLE (single-threaded).
-//
-// The runtime does not run guest threads: OSCreateThread only fills the thread structure. The SDK's
-// scheduler (SelectThread and friends) spins forever when no thread is runnable, so the calls that
-// reach it are replaced by no-ops. A game whose own logic depends on its other threads running will
-// not work with these; real threads need a scheduler that runs each guest thread on its own host
-// thread.
+// Binds the SDK's thread, mutex, condition, message-queue and alarm functions to the guest-thread
+// scheduler in threads.cpp. The SDK's own scheduler (SelectThread and friends) waits for interrupts that
+// do not exist here, so everything that reaches it is replaced.
 #include <cstring>
 
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/threads.h"
 
 namespace gcrecomp {
 
 namespace {
-
-void ret_zero(PPCContext* ctx, Memory*) { ctx->r[3] = 0; }
-void ret_one(PPCContext* ctx, Memory*) { ctx->r[3] = 1; }
-void nothing(PPCContext*, Memory*) {}
 
 struct Entry {
     const char* name;
@@ -25,13 +18,39 @@ struct Entry {
 };
 
 const Entry kTable[] = {
-    {"OSSuspendThread", ret_zero},      // returns the previous suspend count
-    {"OSDisableScheduler", ret_zero},   // returns the previous disable count
-    {"OSEnableScheduler", ret_zero},
-    {"OSSetThreadPriority", ret_one},   // TRUE
-    {"OSExitThread", nothing},
-    {"OSCancelThread", nothing},
-    {"OSYieldThread", nothing},
+    {"OSCreateThread", sched::os_create_thread},
+    {"OSExitThread", sched::os_exit_thread},
+    {"OSCancelThread", sched::os_cancel_thread},
+    {"OSDetachThread", sched::os_detach_thread},
+    {"OSJoinThread", sched::os_join_thread},
+    {"OSResumeThread", sched::os_resume_thread},
+    {"OSSuspendThread", sched::os_suspend_thread},
+    {"OSSleepThread", sched::os_sleep_thread},
+    {"OSWakeupThread", sched::os_wakeup_thread},
+    {"OSYieldThread", sched::os_yield_thread},
+    {"OSSetThreadPriority", sched::os_set_thread_priority},
+    {"OSGetThreadPriority", sched::os_get_thread_priority},
+    {"OSGetCurrentThread", sched::os_get_current_thread},
+    {"OSIsThreadSuspended", sched::os_is_thread_suspended},
+    {"OSIsThreadTerminated", sched::os_is_thread_terminated},
+    {"OSDisableScheduler", sched::os_disable_scheduler},
+    {"OSEnableScheduler", sched::os_enable_scheduler},
+    {"OSInitThreadQueue", sched::os_init_thread_queue},
+    {"OSInitMutex", sched::os_init_mutex},
+    {"OSLockMutex", sched::os_lock_mutex},
+    {"OSTryLockMutex", sched::os_try_lock_mutex},
+    {"OSUnlockMutex", sched::os_unlock_mutex},
+    {"OSInitCond", sched::os_init_cond},
+    {"OSWaitCond", sched::os_wait_cond},
+    {"OSSignalCond", sched::os_signal_cond},
+    {"OSInitMessageQueue", sched::os_init_message_queue},
+    {"OSSendMessage", sched::os_send_message},
+    {"OSJamMessage", sched::os_jam_message},
+    {"OSReceiveMessage", sched::os_receive_message},
+    {"OSCreateAlarm", sched::os_create_alarm},
+    {"OSSetAlarm", sched::os_set_alarm},
+    {"OSSetPeriodicAlarm", sched::os_set_periodic_alarm},
+    {"OSCancelAlarm", sched::os_cancel_alarm},
     {nullptr, nullptr},
 };
 

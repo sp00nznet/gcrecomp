@@ -30,6 +30,7 @@
 #include "gcrecomp/runtime.h"
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
+#include "gcrecomp/threads.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,12 +59,16 @@ namespace gcrecomp {
 
 static auto g_start_time = std::chrono::high_resolution_clock::now();
 
+uint64_t sched::timebase_now() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - g_start_time);
+    return (uint64_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
+}
+
 // OSGetTime: returns 64-bit timebase ticks (40.5 MHz)
 // Return convention: high 32 bits in r3, low 32 bits in r4
 static void os_get_time(PPCContext* ctx, Memory* mem) {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - g_start_time);
-    uint64_t ticks = (uint64_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
+    uint64_t ticks = sched::timebase_now();
     ctx->r[3] = (uint32_t)(ticks >> 32);
     ctx->r[4] = (uint32_t)ticks;
 }
@@ -84,34 +89,31 @@ static void os_ticks_to_ms(PPCContext* ctx, Memory* mem) {
 }
 
 // =============================================================================
-// Interrupts (no-ops in recompilation -- no preemption occurs)
+// Interrupts
 //
-// The original OS uses these to protect critical sections. Since recompiled
-// code runs single-threaded, we simply track the enabled state and return
-// the previous value as the real OS would.
+// The original OS uses these to protect critical sections. Nothing is delivered
+// asynchronously here, so the state is only tracked (per guest thread) and the
+// previous value returned as the real OS would. A thread with interrupts disabled
+// is not interrupted by alarm handlers at the scheduler's switch points.
 //
 // Reference: libogc ogc/irq.h
 // =============================================================================
 
-static bool g_interrupts_enabled = true;
+// The interrupt state belongs to the guest thread: see sched::interrupts_exchange.
 
 // OSDisableInterrupts: returns previous state in r3
 static void os_disable_interrupts(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = g_interrupts_enabled ? 1 : 0;
-    g_interrupts_enabled = false;
+    ctx->r[3] = sched::interrupts_exchange(false) ? 1 : 0;
 }
 
 // OSEnableInterrupts: returns previous state in r3
 static void os_enable_interrupts(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = g_interrupts_enabled ? 1 : 0;
-    g_interrupts_enabled = true;
+    ctx->r[3] = sched::interrupts_exchange(true) ? 1 : 0;
 }
 
 // OSRestoreInterrupts: restore from saved state (r3 = saved state)
 static void os_restore_interrupts(PPCContext* ctx, Memory* mem) {
-    bool prev = g_interrupts_enabled;
-    g_interrupts_enabled = (ctx->r[3] != 0);
-    ctx->r[3] = prev ? 1 : 0;
+    ctx->r[3] = sched::interrupts_exchange(ctx->r[3] != 0) ? 1 : 0;
 }
 
 // =============================================================================
@@ -776,105 +778,9 @@ bool is_disc_mounted() {
     return g_disc_image != nullptr;
 }
 
-// =============================================================================
-// Thread Management (simplified stubs)
-//
-// Most GameCube games are primarily single-threaded for gameplay logic, with
-// auxiliary threads for audio, DVD loading, etc. In a static recompilation
-// environment, we run everything on a single host thread and provide minimal
-// stubs that satisfy SDK initialization (OSCreateThread, OSGetCurrentThread).
-//
-// Reference: libogc ogc/lwp_threads.h, Pureikyubu HLE/os.cpp
-// =============================================================================
-
 static uint32_t g_main_thread_addr = 0;
 
-// OSCreateThread(thread, func, arg, stack_top, stack_size, priority, attrs)
-// Writes a valid thread structure but does not actually spawn a host thread.
-static void os_create_thread(PPCContext* ctx, Memory* mem) {
-    uint32_t thread_addr = ctx->r[3];
-    uint32_t func_addr   = ctx->r[4];
-    uint32_t arg         = ctx->r[5];
-    uint32_t stack_top   = ctx->r[6];
-    uint32_t stack_size  = ctx->r[7];
-    // priority is in r8
-
-    // Zero the thread structure
-    uint8_t* t = mem->translate(thread_addr);
-    if (t) memset(t, 0, os::OSThread::SIZE);
-
-    // Set initial state
-    mem->write16(thread_addr + os::thread_off::STATE, os::OSThread::STATE_READY);
-    mem->write32(thread_addr + os::thread_off::PRIORITY, ctx->r[8]);
-    mem->write32(thread_addr + os::thread_off::BASE_PRIORITY, ctx->r[8]);
-    mem->write32(thread_addr + os::thread_off::STACK_BASE, stack_top);
-    mem->write32(thread_addr + os::thread_off::STACK_END, stack_top - stack_size);
-
-    ctx->r[3] = 1; // TRUE (success)
-}
-
-// OSResumeThread -- mark thread as running
-static void os_resume_thread(PPCContext* ctx, Memory* mem) {
-    uint32_t thread_addr = ctx->r[3];
-    mem->write16(thread_addr + os::thread_off::STATE, os::OSThread::STATE_RUNNING);
-    ctx->r[3] = 0;
-}
-
-// OSGetCurrentThread -- returns pointer to current thread's TCB
-static void os_get_current_thread(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = mem->read32(hw::OS_CURRENT_THREAD);
-}
-
-// OSSleepThread -- stub (no-op in single-threaded recompilation)
-static void os_sleep_thread(PPCContext* ctx, Memory* mem) {
-}
-
-// OSWakeupThread -- stub (no-op)
-static void os_wakeup_thread(PPCContext* ctx, Memory* mem) {
-}
-
-// =============================================================================
-// Mutex (simplified stubs)
-//
-// No-ops in single-threaded recompilation. OSInitMutex zeroes the structure
-// for memory consistency.
-//
-// Reference: libogc ogc/mutex.h
-// =============================================================================
-
-static void os_init_mutex(PPCContext* ctx, Memory* mem) {
-    uint32_t mutex = ctx->r[3];
-    uint8_t* p = mem->translate(mutex);
-    if (p) memset(p, 0, os::OSMutex::SIZE);
-}
-
-static void os_lock_mutex(PPCContext* ctx, Memory* mem) {
-    // No-op in single-threaded recompilation
-}
-
-static void os_unlock_mutex(PPCContext* ctx, Memory* mem) {
-    // No-op
-}
-
-// =============================================================================
-// Message Queue (simplified stubs)
-//
-// Reference: libogc ogc/message.h
-// =============================================================================
-
-static void os_init_message_queue(PPCContext* ctx, Memory* mem) {
-    uint32_t mq = ctx->r[3];
-    uint8_t* p = mem->translate(mq);
-    if (p) memset(p, 0, os::OSMessageQueue::SIZE);
-}
-
-static void os_send_message(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = 1; // TRUE
-}
-
-static void os_receive_message(PPCContext* ctx, Memory* mem) {
-    ctx->r[3] = 0; // FALSE (no messages)
-}
+// Threads, mutexes, message queues and alarms: src/os/threads.cpp (bound through src/os/thread_funcs.cpp).
 
 // =============================================================================
 // Low-Memory Initialization
@@ -1026,7 +932,7 @@ void hle_dump(size_t top) {
 static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
     g_vi_retrace_count++;
     if (g_retrace_hook) g_retrace_hook();
-    std::this_thread::sleep_for(std::chrono::microseconds(16667));
+    sched::retrace_wait(ctx, mem, 16667);
 }
 
 static void vi_get_retrace_count(PPCContext* ctx, Memory* mem) {
@@ -1500,23 +1406,6 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDClose",               dvd_close },
     { "DVDReadPrio",            dvd_read_prio },
     { "DVDReadAsync",           dvd_read_async },
-
-    // --- Thread ---
-    { "OSCreateThread",         os_create_thread },
-    { "OSResumeThread",         os_resume_thread },
-    { "OSGetCurrentThread",     os_get_current_thread },
-    { "OSSleepThread",          os_sleep_thread },
-    { "OSWakeupThread",         os_wakeup_thread },
-
-    // --- Mutex ---
-    { "OSInitMutex",            os_init_mutex },
-    { "OSLockMutex",            os_lock_mutex },
-    { "OSUnlockMutex",          os_unlock_mutex },
-
-    // --- Message Queue ---
-    { "OSInitMessageQueue",     os_init_message_queue },
-    { "OSSendMessage",          os_send_message },
-    { "OSReceiveMessage",       os_receive_message },
 
     // --- Video Interface (VI) ---
     { "VIInit",                 vi_init },

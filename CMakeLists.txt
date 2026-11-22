@@ -28,6 +28,12 @@ endif()
 option(GCRECOMP_BUILD_TOOLS "Build recompiler tools" ON)
 option(GCRECOMP_BUILD_RUNTIME "Build the game runtime libraries" ON)
 option(GCRECOMP_BUILD_EXAMPLE "Build the example launcher" ON)
+# Unit tests (CTest): on when gcrecomp is the top-level project, off when it is added as a subdirectory.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    option(GCRECOMP_BUILD_TESTS "Build the unit tests" ON)
+else()
+    option(GCRECOMP_BUILD_TESTS "Build the unit tests" OFF)
+endif()
 
 # ===========================================================================
 # Runtime Library: Links with recompiled game code
@@ -47,9 +53,12 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/gx_funcs.cpp
         src/os/pad_funcs.cpp
         src/os/thread_funcs.cpp
+        src/os/threads.cpp
         src/os/rel.cpp
     )
     target_include_directories(gcrecomp_runtime PUBLIC include)
+    find_package(Threads REQUIRED)
+    target_link_libraries(gcrecomp_runtime PUBLIC Threads::Threads)
 
     # GX Graphics (D3D11 backend)
     add_library(gcrecomp_gx STATIC
@@ -109,6 +118,17 @@ if(GCRECOMP_BUILD_RUNTIME)
     else()
         message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")
     endif()
+endif()
+
+# ===========================================================================
+# Unit tests
+# ===========================================================================
+if(GCRECOMP_BUILD_TESTS AND GCRECOMP_BUILD_RUNTIME)
+    enable_testing()
+    add_executable(test_threads tests/test_threads.cpp)
+    target_link_libraries(test_threads PRIVATE gcrecomp_runtime)
+    add_test(NAME threads COMMAND test_threads)
+    set_tests_properties(threads PROPERTIES TIMEOUT 60)
 endif()
 
 # ===========================================================================

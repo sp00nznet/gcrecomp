@@ -28,26 +28,30 @@ namespace gcrecomp::os {
 // =============================================================================
 // OSThread - Thread control block
 //
-// The Dolphin OS uses a cooperative threading model. Each thread has a control
-// block (TCB) of 0x318 bytes stored in emulated memory. The recompilation
-// runtime does not implement actual preemptive threading; instead it writes
-// valid TCB structures so that SDK initialization code (OSInit, OSCreateThread)
-// sees consistent state.
+// The Dolphin OS uses a priority-scheduled threading model. Each thread has a
+// control block (TCB) of 0x318 bytes stored in emulated memory. The runtime
+// keeps these structures in the SDK's layout while the scheduler in
+// src/os/threads.cpp runs the threads (see gcrecomp/threads.h).
 //
 // Reference: libogc ogc/lwp_threads.h, Pureikyubu HLE/os.cpp
 // =============================================================================
 struct OSThread {
     // The full struct is 0x318 bytes. Key fields:
     // 0x000: OSContext (register save area, 0x2C8 bytes)
-    // 0x2C8: state (u16)     -- current scheduling state
-    // 0x2CA: attributes (u16) -- detach/joinable flags
-    // 0x2CC: suspend count (s32) -- incremented on OSSuspendThread
+    // 0x2C8: state (u16)         -- current scheduling state
+    // 0x2CA: attributes (u16)    -- OS_THREAD_ATTR_DETACH
+    // 0x2CC: suspend count (s32) -- created suspended (1), OSResumeThread decrements
     // 0x2D0: effective priority (s32) -- may be boosted by mutex inheritance
-    // 0x2D4: base priority (s32)  -- priority set at creation time
-    // 0x2D8: exit value (void*)   -- value passed to OSExitThread
-    // 0x2DC-0x2E3: thread queue links (next/prev pointers)
-    // 0x2F4: stack base (void*)   -- top of stack (highest address)
-    // 0x2F8: stack end (void*)    -- bottom of stack (lowest address)
+    // 0x2D4: base priority (s32)
+    // 0x2D8: exit value (void*)
+    // 0x2DC: queue (OSThreadQueue*) the thread is waiting on
+    // 0x2E0: link (next, prev)   -- in that queue
+    // 0x2E8: join queue (head, tail)
+    // 0x2F0: mutex (OSMutex*) the thread is waiting for
+    // 0x2F4: owned mutex queue (head, tail)
+    // 0x2FC: active-thread link (next, prev)
+    // 0x304: stack base (highest address), 0x308: stack end (lowest address)
+    // 0x30C: error, 0x310: specific[2]
     static constexpr uint32_t SIZE = 0x318;
 
     // State values (matches OS_THREAD_STATE_* in libogc)
@@ -67,12 +71,15 @@ namespace thread_off {
     constexpr uint32_t PRIORITY       = 0x2D0;
     constexpr uint32_t BASE_PRIORITY  = 0x2D4;
     constexpr uint32_t EXIT_VALUE     = 0x2D8;
-    constexpr uint32_t QUEUE_NEXT     = 0x2DC;
-    constexpr uint32_t QUEUE_PREV     = 0x2E0;
-    constexpr uint32_t LINK_NEXT      = 0x2E4;
-    constexpr uint32_t LINK_PREV      = 0x2E8;
-    constexpr uint32_t STACK_BASE     = 0x2F4;
-    constexpr uint32_t STACK_END      = 0x2F8;
+    constexpr uint32_t QUEUE          = 0x2DC;
+    constexpr uint32_t LINK_NEXT      = 0x2E0;
+    constexpr uint32_t LINK_PREV      = 0x2E4;
+    constexpr uint32_t JOIN_QUEUE     = 0x2E8;  // OSThreadQueue (head, tail)
+    constexpr uint32_t MUTEX          = 0x2F0;
+    constexpr uint32_t MUTEX_QUEUE    = 0x2F4;  // OSMutexQueue (head, tail)
+    constexpr uint32_t STACK_BASE     = 0x304;
+    constexpr uint32_t STACK_END      = 0x308;
+    constexpr uint16_t ATTR_DETACH    = 1;
 }
 
 // =============================================================================
@@ -104,13 +111,20 @@ namespace ctx_off {
 // OSAlarm - Timer alarm structure
 //
 // Used by OSSetAlarm / OSSetPeriodicAlarm to schedule callbacks at specific
-// timebase tick counts. The runtime stubs these as no-ops.
+// timebase tick counts. Fired by the scheduler in src/os/threads.cpp.
 //
 // Reference: libogc ogc/system.h
 // =============================================================================
 struct OSAlarm {
     static constexpr uint32_t SIZE = 0x28;
 };
+namespace alarm_off {
+    constexpr uint32_t HANDLER = 0x00;
+    constexpr uint32_t TAG     = 0x04;
+    constexpr uint32_t FIRE    = 0x08;  // u64 timebase
+    constexpr uint32_t PERIOD  = 0x18;  // u64
+    constexpr uint32_t START   = 0x20;  // u64
+}
 
 // =============================================================================
 // OSMutex - Mutual exclusion lock
@@ -123,6 +137,13 @@ struct OSAlarm {
 struct OSMutex {
     static constexpr uint32_t SIZE = 0x18;
 };
+namespace mutex_off {
+    constexpr uint32_t QUEUE     = 0x00;  // OSThreadQueue of waiters
+    constexpr uint32_t THREAD    = 0x08;  // owner
+    constexpr uint32_t COUNT     = 0x0C;  // recursion count
+    constexpr uint32_t LINK_NEXT = 0x10;  // link in the owner's mutex queue
+    constexpr uint32_t LINK_PREV = 0x14;
+}
 
 // =============================================================================
 // OSMessageQueue - Inter-thread message passing
@@ -135,6 +156,14 @@ struct OSMutex {
 struct OSMessageQueue {
     static constexpr uint32_t SIZE = 0x20;
 };
+namespace mq_off {
+    constexpr uint32_t SEND_QUEUE    = 0x00;
+    constexpr uint32_t RECEIVE_QUEUE = 0x08;
+    constexpr uint32_t MSG_ARRAY     = 0x10;
+    constexpr uint32_t MSG_COUNT     = 0x14;
+    constexpr uint32_t FIRST_INDEX   = 0x18;
+    constexpr uint32_t USED_COUNT    = 0x1C;
+}
 
 // =============================================================================
 // DVD structures
