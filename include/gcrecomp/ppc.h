@@ -112,7 +112,7 @@ enum class PPCInsnType {
     LFS, LFSU, LFSX, LFSUX,
     LFD, LFDU, LFDX, LFDUX,
     STFS, STFSU, STFSX, STFSUX,
-    STFD, STFDU, STFDX, STFDUX,
+    STFD, STFDU, STFDX, STFDUX, STFIWX,
 
     // Branch
     B, BC, BCLR, BCCTR,

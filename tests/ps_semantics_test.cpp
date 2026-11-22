@@ -221,6 +221,11 @@ static void convert_tests() {
     sem_fctiwz(&c, mem); CHECK(low(c) == 0x7FFFFFFF);
     c.f[3] = -1e20;
     sem_fctiwz(&c, mem); CHECK(low(c) == INT32_MIN);
+    // stfiwx stores the low word of the register as it is (after fctiwz).
+    c = {}; c.f[3] = -7.9; c.r[3] = 0x80700000; c.r[5] = 0x80;
+    sem_fctiwz(&c, mem);
+    sem_stfiwx(&c, mem);
+    CHECK(static_cast<int32_t>(g_mem.read32(0x80700080)) == -7);
     c.f[3] = std::nan("");
     sem_fctiwz(&c, mem); CHECK(low(c) == INT32_MIN);
 }

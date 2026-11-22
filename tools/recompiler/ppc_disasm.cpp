@@ -409,6 +409,7 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         case 663: insn.type = PPCInsnType::STFSX;  insn.mnemonic = "stfsx"; break;
         case 695: insn.type = PPCInsnType::STFSUX; insn.mnemonic = "stfsux"; break;
         case 727: insn.type = PPCInsnType::STFDX;  insn.mnemonic = "stfdx"; break;
+        case 983: insn.type = PPCInsnType::STFIWX; insn.mnemonic = "stfiwx"; break;
         case 759: insn.type = PPCInsnType::STFDUX; insn.mnemonic = "stfdux"; break;
         case 339: insn.type = PPCInsnType::MFSPR;  insn.mnemonic = "mfspr";
                   insn.spr = PPC_SPR(raw); break;

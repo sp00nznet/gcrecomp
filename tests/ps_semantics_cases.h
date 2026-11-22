@@ -52,4 +52,5 @@ constexpr uint32_t psq_xform(uint32_t xo6, uint32_t reg, uint32_t ra, uint32_t r
     X(psq_stx_single, psq_xform(7, 2, 3, 5, 1, 2)) /* psq_stx f2,r3,r5,1,qr2 */                                  \
     X(psq_lux_pair, psq_xform(38, 4, 3, 5, 0, 1)) /* psq_lux f4,r3,r5,0,qr1 */                                   \
     X(fctiwz, fp_a(63, 15, 4, 0, 3, 0))          /* fctiwz f4,f3 */                                              \
+    X(stfiwx, (31u << 26) | (4u << 21) | (3u << 16) | (5u << 11) | (983u << 1)) /* stfiwx f4,r3,r5 */ \
     X(fctiw, fp_a(63, 14, 4, 0, 3, 0))           /* fctiw f4,f3 */

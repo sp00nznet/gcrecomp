@@ -604,6 +604,11 @@ namespace gcrecomp {
             emit("MEM_WRITEF32(%s + ctx->r[%u], (float)ctx->f[%u]);",
                  insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb, insn.rs);
             break;
+        // stfiwx: the low word of the register's 64 bits, as an integer (the result of fctiwz)
+        case PPCInsnType::STFIWX:
+            emit("{ uint64_t b; std::memcpy(&b, &ctx->f[%u], 8); MEM_WRITE32(%s + ctx->r[%u], (uint32_t)b); }", insn.rs,
+                 insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb);
+            break;
         case PPCInsnType::STFDX:
             emit("MEM_WRITEF64(%s + ctx->r[%u], ctx->f[%u]);",
                  insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb, insn.rs);
