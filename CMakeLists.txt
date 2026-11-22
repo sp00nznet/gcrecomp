@@ -100,6 +100,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
             src/gp/gl_renderer.cpp
+            src/gp/efb_copy.cpp
         )
         target_include_directories(gcrecomp_gp PUBLIC include)
         target_include_directories(gcrecomp_gp PRIVATE ${SDL3_INCLUDE_DIRS})
@@ -109,6 +110,14 @@ if(GCRECOMP_BUILD_RUNTIME)
     else()
         message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")
     endif()
+endif()
+
+# Unit tests (no display, no disc): ctest or build/tests/efb_copy_test
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(efb_copy_test tests/efb_copy_test.cpp src/gp/efb_copy.cpp src/gx/gx_texture.cpp)
+    target_include_directories(efb_copy_test PRIVATE include src/gp)
+    add_test(NAME efb_copy COMMAND efb_copy_test)
 endif()
 
 # ===========================================================================
