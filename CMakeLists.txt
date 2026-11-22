@@ -51,6 +51,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/rarc.cpp
         src/os/ai_funcs.cpp
         src/os/ar_funcs.cpp
+        src/os/dsp_interface.cpp
         src/os/card_image.cpp
         src/os/card_funcs.cpp
         src/os/dvd_funcs.cpp
@@ -216,6 +217,9 @@ if(GCRECOMP_BUILD_TESTS AND GCRECOMP_BUILD_RUNTIME)
     add_executable(gcrecomp_ai_hle_tests tests/ai_hle_tests.cpp)
     target_link_libraries(gcrecomp_ai_hle_tests PRIVATE gcrecomp_runtime gcrecomp_audio)
     add_test(NAME ai_hle COMMAND gcrecomp_ai_hle_tests)
+    add_executable(gcrecomp_dsp_tests tests/dsp_tests.cpp)
+    target_link_libraries(gcrecomp_dsp_tests PRIVATE gcrecomp_runtime)
+    add_test(NAME dsp COMMAND gcrecomp_dsp_tests)
 endif()
 
 # ===========================================================================

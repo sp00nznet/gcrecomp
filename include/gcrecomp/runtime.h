@@ -317,6 +317,10 @@ extern void (*g_retrace_hook)();
 // points where the game could have been interrupted: re-enabling interrupts, retrace waits, clock reads.
 void ai_poll(PPCContext* ctx, Memory* mem);
 
+// Delivers the DSP block's pending ARAM / DSP interrupt (calls the handler the game registered with
+// __OSSetInterruptHandler) at the same points as ai_poll. See hw/dsp.h.
+void dsp_poll(PPCContext* ctx, Memory* mem);
+
 // Drops all AI state and makes the AI replacements play into `sink` (not owned; null restores the default
 // choice of SDL3 or the null sink). For tests.
 namespace audio { class AudioSink; }

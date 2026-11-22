@@ -28,6 +28,7 @@
 // =============================================================================
 
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/interrupts.h"
 #include "gcrecomp/hw/gc_hw.h"
 #include "gcrecomp/hw/os_defs.h"
 #include "gcrecomp/threads.h"
@@ -108,7 +109,24 @@ static void os_ticks_to_ms(PPCContext* ctx, Memory* mem) {
 // The interrupt state belongs to the guest thread: see sched::interrupts_exchange.
 
 static void deliver_interrupts(PPCContext* ctx, Memory* mem) {
-    if (sched::interrupts_enabled()) ai_poll(ctx, mem);
+    if (!sched::interrupts_enabled()) return;
+    ai_poll(ctx, mem);
+    dsp_poll(ctx, mem);
+}
+
+// __OSSetInterruptHandler(OSInterruptType type, OSInterruptHandler handler) -> previous handler.
+// The handlers are kept in g_interrupts, where the DSP device (and the VI scheduler) find them.
+static void os_set_interrupt_handler(PPCContext* ctx, Memory*) {
+    const uint32_t id = ctx->r[3];
+    const uint32_t previous = id < (uint32_t)InterruptScheduler::MAX_INTR_ID ? g_interrupts.handlers[id] : 0;
+    g_interrupts.set_handler((int)id, ctx->r[4]);
+    ctx->r[3] = previous;
+}
+
+// __OSGetInterruptHandler(OSInterruptType type) -> handler
+static void os_get_interrupt_handler(PPCContext* ctx, Memory*) {
+    const uint32_t id = ctx->r[3];
+    ctx->r[3] = id < (uint32_t)InterruptScheduler::MAX_INTR_ID ? g_interrupts.handlers[id] : 0;
 }
 
 // OSDisableInterrupts: returns previous state in r3
@@ -1053,6 +1071,8 @@ static const OSFuncEntry g_os_func_table[] = {
     { "OSDisableInterrupts",    os_disable_interrupts },
     { "OSEnableInterrupts",     os_enable_interrupts },
     { "OSRestoreInterrupts",    os_restore_interrupts },
+    { "__OSSetInterruptHandler", os_set_interrupt_handler },
+    { "__OSGetInterruptHandler", os_get_interrupt_handler },
 
     // --- Arena ---
     { "OSGetArenaLo",           os_get_arena_lo },

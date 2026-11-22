@@ -8,21 +8,19 @@
 // callbacks synchronously.
 #include <cstdio>
 #include <cstring>
-#include <vector>
 
+#include "gcrecomp/hw/dsp.h"
 #include "gcrecomp/runtime.h"
 
 namespace gcrecomp {
 
 namespace {
 
-constexpr uint32_t kAramSize = 16 * 1024 * 1024;
+constexpr uint32_t kAramSize = uint32_t(DspInterface::kAramSize);
 constexpr uint32_t kAramInternal = 0x4000;  // first 16 KB are used by the DSP
 
-std::vector<uint8_t>& aram() {
-    static std::vector<uint8_t> buffer(kAramSize, 0);
-    return buffer;
-}
+// ARAM is the DSP interface's: the register-level DMA and these replacements see the same memory.
+uint8_t* aram() { return g_dsp.aram(); }
 
 uint32_t g_dma_callback = 0;
 
@@ -46,8 +44,8 @@ bool dma(Memory* mem, uint32_t type, uint32_t main_addr, uint32_t aram_addr, uin
         std::printf("[AR] DMA with invalid main memory address 0x%08X\n", main_addr);
         return false;
     }
-    if (type == 0) std::memcpy(&aram()[aram_addr], host, length);
-    else std::memcpy(host, &aram()[aram_addr], length);
+    if (type == 0) std::memcpy(aram() + aram_addr, host, length);
+    else std::memcpy(host, aram() + aram_addr, length);
     return true;
 }
 

@@ -23,6 +23,7 @@
 
 #include "gcrecomp/runtime.h"
 #include "gcrecomp/interrupts.h"
+#include "gcrecomp/hw/dsp.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,10 @@
 namespace gcrecomp {
 
 Memory g_mem;
+
+static inline bool is_dsp_reg(uint32_t addr) {
+    return addr - DspInterface::kBase < DspInterface::kSize;
+}
 
 bool Memory::init(uint32_t size) {
     ram_size = size;
@@ -68,6 +73,8 @@ uint8_t* Memory::translate(uint32_t addr) {
     // have access to the current ctx here — the recompiled code uses
     // g_ctx directly (see recomp_common.h's using-declarations).
     if ((op_count & 0x3FFFF) == 0) {
+        // A game spinning on a flag its DSP interrupt handler sets never reaches an OS safe point.
+        dsp_poll(&g_ctx, this);
         g_interrupts.tick(&g_ctx, this);
     }
     // Cached region: 0x80000000 - 0x80000000+ram_size
@@ -126,35 +133,14 @@ uint16_t Memory::read16(uint32_t addr) const {
         }
     }
 
-    // DSP -> CPU mailbox HIGH (0xCC005004): bit 15 (0x8000) is the
-    // "DSP has a message for the CPU" flag. With no DSP emulation we
-    // simulate the protocol: the *first* read returns the stored value
-    // (so the OS init "wait until mailbox is empty" poll exits when bit 15
-    // is naturally 0), and every subsequent read returns the stored value
-    // OR'd with 0x8000 (so the "wait until DSP responds" poll exits too).
-    // The OS reads the LOW half (0xCC005006) right after, which we use as
-    // the "message consumed" signal to reset bit 15 for the next cycle.
-    if (addr == 0xCC005004) {
-        static int read_count = 0;
-        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
-        uint16_t v = ((uint16_t)p[0] << 8) | p[1];
-        if (read_count++ > 0) v |= 0x8000;
-        return v;
-    }
-    if (addr == 0xCC005006) {
-        // Mark the message as consumed — next 5004 read returns the raw value
-        // (bit 15 == 0) so a subsequent outbound cycle's "wait for clear"
-        // poll exits. Then increment read counter on next 5004 read flips
-        // bit 15 back on. (Effectively: each 5006 read primes a fresh cycle.)
-        const uint8_t* p = hw_regs + (addr - HW_REG_BASE);
-        return ((uint16_t)p[0] << 8) | p[1];
-    }
+    if (is_dsp_reg(addr)) return (uint16_t)g_dsp.read(addr - DspInterface::kBase, 2);
 
     const uint8_t* p = translate(addr);
     return ((uint16_t)p[0] << 8) | p[1];
 }
 
 uint32_t Memory::read32(uint32_t addr) const {
+    if (is_dsp_reg(addr)) return g_dsp.read(addr - DspInterface::kBase, 4);
     // HW register HLE for reads
     if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
         static std::unordered_map<uint32_t, int> hw_read_count;
@@ -276,17 +262,6 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
         fflush(stdout);
     }
 
-    // ARAM DMA registers — when the game writes AR_DMA_CNT it kicks off
-    // an ARAM<->main-RAM DMA transfer. The DSPCR's ARINT bit (0x0020)
-    // sets when the transfer completes. With no DSP/ARAM emulation we
-    // signal "done" immediately by setting ARINT in DSPCR.
-    // Some games write AR_DMA_CNT as 32-bit, some as 16-bit halves;
-    // catch both the high (0x5028) and the canonical low (0x502A) names.
-    if (addr == 0xCC005028 || addr == 0xCC00502A) {
-        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
-        dspcr_p[1] |= 0x20; // ARINT
-    }
-
     // EXI DMA Control Register: when TSTART (bit 0) is set, immediately
     // complete the transfer by clearing it. On real hardware the EXI
     // controller does the DMA and clears TSTART when done.
@@ -313,11 +288,7 @@ static void hw_write32_hle(Memory* mem, uint32_t addr, uint32_t val) {
     p[3] = (uint8_t)val;
 }
 
-// 16-bit HW register HLE — covers DSP/AI ports which are 16-bit-addressable.
-// Pattern: game writes "start" bits (reset, DMA, transfer-in-progress) and
-// then polls the same register until those bits clear. Real hardware clears
-// them when the operation completes; without device emulation we just clear
-// them immediately so the poll exits.
+// 16-bit HW register stores: the DSP block has a device; the rest is plain storage.
 static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
     static std::unordered_map<uint32_t, int> hw_w16_count;
     int& count = hw_w16_count[addr];
@@ -326,32 +297,6 @@ static void hw_write16_hle(Memory* mem, uint32_t addr, uint16_t val) {
         fflush(stdout);
     }
     count++;
-
-    // DSP Control/Status Register (0xCC00500A, 16-bit).
-    // Self-clearing bits: RES (0x0001), DSP_DMA (0x0200).
-    if (addr == 0xCC00500A) {
-        val &= ~0x0001u;  // RES — DSP reset completes instantly
-        val &= ~0x0200u;  // DSPDMA — DSP DMA "transfer complete"
-    }
-
-    // DSP Mailbox From CPU High (0xCC005004): bit 15 (0x8000) is the
-    // "message pending" status flag. The game writes the high half with
-    // 0x8000 set to signal "new message", then polls until the DSP
-    // (here, us) clears it. Without DSP emulation, clear it immediately
-    // so the message "send" loop exits.
-    if (addr == 0xCC005004) {
-        val &= ~0x8000u;
-    }
-
-    // AR DMA Count (0xCC005028/0xCC00502A) — when written, the ARAM DMA
-    // starts. DSPCR's ARINT bit (0x0020) sets when DMA completes; for
-    // emulated boot we tell the game "DMA already done" by setting ARINT
-    // in DSPCR's stored value.
-    if (addr == 0xCC005028 || addr == 0xCC00502A) {
-        uint8_t* dspcr_p = mem->hw_regs + (0xCC00500A - Memory::HW_REG_BASE);
-        // DSPCR is 16-bit big-endian; bit 5 = ARINT in the low byte.
-        dspcr_p[1] |= 0x20;
-    }
 
     uint8_t* p = mem->hw_regs + (addr - Memory::HW_REG_BASE);
     p[0] = (uint8_t)(val >> 8);
@@ -376,6 +321,10 @@ void Memory::write16(uint32_t addr, uint16_t val) {
         g_wgp_write(2, val);
         return;
     }
+    if (is_dsp_reg(addr)) {
+        g_dsp.write(addr - DspInterface::kBase, val, 2, ram, ram_size);
+        return;
+    }
     if (addr >= HW_REG_BASE && addr < HW_REG_BASE + HW_REG_SIZE) {
         hw_write16_hle(this, addr, val);
         return;
@@ -388,6 +337,10 @@ void Memory::write16(uint32_t addr, uint16_t val) {
 void Memory::write32(uint32_t addr, uint32_t val) {
     if (addr == kWgpAddr && g_wgp_write) {
         g_wgp_write(4, val);
+        return;
+    }
+    if (is_dsp_reg(addr)) {
+        g_dsp.write(addr - DspInterface::kBase, val, 4, ram, ram_size);
         return;
     }
     // Intercept HW register writes for HLE

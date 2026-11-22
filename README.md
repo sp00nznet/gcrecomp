@@ -229,6 +229,18 @@ GameCube audio uses a custom DSP with ADPCM compression:
   block starts, where the game could have been interrupted (re-enabling interrupts, retrace
   wait, clock read). `AIRegisterDMACallback` must be named in the game's symbol map. The DSP
   (AX, or a game's own microcode) is not emulated. Tests: `ctest --test-dir build`.
+- **DSP interface** (`src/os/dsp_interface.cpp`, `hw/dsp.h`): the registers at
+  `0xCC005000..0xCC00503F` are a device (`g_dsp`), not stored bytes: CPU->DSP and DSP->CPU
+  mailboxes (valid flag in bit 15, reading the low half consumes), the control register (reset,
+  halt, write-1-to-clear interrupt flags and masks), the ARAM DMA registers (16 MiB ARAM, shared
+  with the `AR*` replacements). The mask ROM's boot protocol is answered (`0x8071FEED` after
+  reset, boot-task command mails, `DSP_INIT` `0xDCD10000` plus a DSP interrupt when the uploaded
+  microcode starts). From then on nothing answers: a game's own microcode needs a DSP core or a
+  microcode HLE, and its mails stay pending. The DSP interrupt is delivered to the handler the
+  game registered with `__OSSetInterruptHandler` (replaced: `__OSSetInterruptHandler` must be
+  named in the symbol map; so must `OSDisableInterrupts`/`OSEnableInterrupts`, otherwise the
+  recompiled `mfmsr`/`mtmsr` no-ops leave the guest's interrupt state wrong), at the OS safe
+  points and every 256K memory operations. `DSP_TRACE=1` logs mails and control writes on stderr.
 
 ### Input (`src/input/`)
 
