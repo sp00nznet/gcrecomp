@@ -456,6 +456,8 @@ void write_screenshot() {
     if (!g_shot_dir || (g_shot_max && g_shot_count >= g_shot_max)) return;
     std::vector<uint8_t> px(size_t(g_window_w) * g_window_h * 3);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    // The blit that precedes this call leaves the EFB bound for reading: read the window instead.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glReadBuffer(GL_BACK);
     glReadPixels(0, 0, g_window_w, g_window_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
     char path[512];
