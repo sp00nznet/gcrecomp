@@ -579,12 +579,15 @@ namespace gcrecomp {
             break;
 
         // ==== Floating Point Arithmetic ====
+        // Single-precision operations take the double-precision register values as they are and
+        // round the result to single. Rounding the operands first would break the common
+        // int-to-float trick (subtracting 2^52 from 2^52 + n).
         case PPCInsnType::FADDS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] + (float)ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
+            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] + ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
                  insn.rd, insn.ra, insn.rb, insn.rd, insn.rd);
             break;
         case PPCInsnType::FSUBS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] - (float)ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
+            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] - ctx->f[%u]); ctx->ps[%u][0] = (float)ctx->f[%u];",
                  insn.rd, insn.ra, insn.rb, insn.rd, insn.rd);
             break;
         case PPCInsnType::FMULS:
@@ -609,19 +612,19 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::FMADDS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] * (float)ctx->f[%u] + (float)ctx->f[%u]);",
+            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] * ctx->f[%u] + ctx->f[%u]);",
                  insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMSUBS:
-            emit("ctx->f[%u] = (double)((float)ctx->f[%u] * (float)ctx->f[%u] - (float)ctx->f[%u]);",
+            emit("ctx->f[%u] = (double)(float)(ctx->f[%u] * ctx->f[%u] - ctx->f[%u]);",
                  insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMSUBS:
-            emit("ctx->f[%u] = (double)-((float)ctx->f[%u] * (float)ctx->f[%u] - (float)ctx->f[%u]);",
+            emit("ctx->f[%u] = (double)(float)-(ctx->f[%u] * ctx->f[%u] - ctx->f[%u]);",
                  insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMADDS:
-            emit("ctx->f[%u] = (double)-((float)ctx->f[%u] * (float)ctx->f[%u] + (float)ctx->f[%u]);",
+            emit("ctx->f[%u] = (double)(float)-(ctx->f[%u] * ctx->f[%u] + ctx->f[%u]);",
                  insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMADD:
