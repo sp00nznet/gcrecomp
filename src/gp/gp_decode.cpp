@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "gp_decode.h"
 
+#include <cmath>
+#include <cstring>
+
 #include "gcrecomp/gx/gx.h"
 
 namespace gcrecomp::gx {
@@ -135,5 +138,50 @@ size_t mip_chain_bytes(uint32_t w, uint32_t h, uint32_t fmt, uint32_t levels) {
 }
 
 float lod_bias_of(uint32_t mode0) { return float(int8_t((mode0 >> 9) & 0xFF)) / 32.0f; }
+
+namespace {
+// A and C of the fog registers: the top 20 bits of an IEEE-754 single.
+float fog_float(uint32_t field) {
+    const uint32_t bits = (field & 0xFFFFF) << 12;
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+}  // namespace
+
+FogParams decode_fog(const uint32_t* bp) {
+    FogParams p;
+    p.a = fog_float(bp[0xEE]);
+    p.b_mag = bp[0xEF] & 0xFFFFFF;
+    p.b_shift = bp[0xF0] & 0x1F;
+    p.c = fog_float(bp[0xF1]);
+    p.ortho = (bp[0xF1] >> 20) & 1;
+    p.type = (bp[0xF1] >> 21) & 7;
+    p.color[0] = float((bp[0xF2] >> 16) & 0xFF) / 255.0f;
+    p.color[1] = float((bp[0xF2] >> 8) & 0xFF) / 255.0f;
+    p.color[2] = float(bp[0xF2] & 0xFF) / 255.0f;
+    return p;
+}
+
+float fog_factor(const FogParams& p, uint32_t z24) {
+    if (p.type == kFogOff) return 0.0f;
+    float ze;
+    if (p.ortho) {
+        ze = p.a * float(z24) / 16777216.0f;
+    } else {
+        // ze = A / (B - (Zs >> B_SHIFT)), with A scaled by 2^24 for the integer depth.
+        const int32_t denom = int32_t(p.b_mag) - int32_t(z24 >> p.b_shift);
+        ze = denom != 0 ? p.a * 16777216.0f / float(denom) : 1e30f;
+    }
+    float f = ze - p.c;
+    f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+    switch (p.type) {
+        case kFogExp: return 1.0f - std::exp2(-8.0f * f);
+        case kFogExp2: return 1.0f - std::exp2(-8.0f * f * f);
+        case kFogBackwardsExp: return std::exp2(-8.0f * (1.0f - f));
+        case kFogBackwardsExp2: f = 1.0f - f; return std::exp2(-8.0f * f * f);
+        default: return f;  // linear
+    }
+}
 
 }  // namespace gcrecomp::gp

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Unit tests for the pure GP helpers (src/gp/gp_decode.*): no display, no disc.
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -130,6 +131,87 @@ static void test_lod_fields() {
     CHECK(max_lod_of(0x2800) == 2.5f);
 }
 
+// Encodes fog the way the SDK does (GX_SetFog, perspective case), so that the decoder is checked against
+// the writer of the registers rather than against itself.
+static void encode_fog_perspective(uint32_t* bp, uint32_t type, float startz, float endz, float nearz, float farz,
+                                   uint32_t rgb) {
+    const float A = (farz * nearz) / ((farz - nearz) * (endz - startz));
+    const float B = farz / (farz - nearz);
+    const float C = startz / (endz - startz);
+    float b_mant = B;
+    uint32_t b_expn = 1;
+    while (b_mant > 1.0f) { b_mant /= 2.0f; ++b_expn; }
+    while (b_mant > 0.0f && b_mant < 0.5f) { b_mant *= 2.0f; --b_expn; }
+    const float a_f = A / float(1u << b_expn);
+    const uint32_t b_m = uint32_t(b_mant * 8388638.0f);
+    uint32_t a_bits, c_bits;
+    std::memcpy(&a_bits, &a_f, 4);
+    std::memcpy(&c_bits, &C, 4);
+    bp[0xEE] = a_bits >> 12;
+    bp[0xEF] = b_m & 0xFFFFFF;
+    bp[0xF0] = b_expn & 0x1F;
+    bp[0xF1] = (type << 21) | (c_bits >> 12);
+    bp[0xF2] = rgb;
+}
+
+static void test_fog_linear_perspective() {
+    const float n = 1.0f, f = 1000.0f, start = 10.0f, end = 100.0f;
+    uint32_t bp[256] = {};
+    encode_fog_perspective(bp, kFogLinear, start, end, n, f, 0x336699);
+    const FogParams p = decode_fog(bp);
+    CHECK(p.type == kFogLinear && !p.ortho);
+    CHECK(std::fabs(p.color[0] - 0x33 / 255.0f) < 1e-6f && std::fabs(p.color[1] - 0x66 / 255.0f) < 1e-6f &&
+          std::fabs(p.color[2] - 0x99 / 255.0f) < 1e-6f);
+    // Depth of an eye-space distance d under the GX perspective projection, as a 24-bit integer.
+    for (float d : {2.0f, 10.0f, 30.0f, 55.0f, 99.0f, 100.0f, 400.0f}) {
+        const float zs = f / (f - n) * (1.0f - n / d);
+        const uint32_t z24 = uint32_t(zs * 16777215.0f + 0.5f);
+        float expect = (d - start) / (end - start);
+        expect = expect < 0 ? 0 : expect > 1 ? 1 : expect;
+        CHECK(std::fabs(fog_factor(p, z24) - expect) < 3e-3f);
+    }
+}
+
+static void test_fog_types() {
+    uint32_t bp[256] = {};
+    encode_fog_perspective(bp, kFogOff, 10, 100, 1, 1000, 0);
+    CHECK(fog_factor(decode_fog(bp), 0xFFFFFF) == 0.0f);  // fog disabled
+    // Mid-range point of the linear ramp (x = 0.5) through the four non-linear curves.
+    const float d = 55.0f, zs = 1000.0f / 999.0f * (1.0f - 1.0f / d);
+    const uint32_t z24 = uint32_t(zs * 16777215.0f + 0.5f);
+    const float x = 0.5f;
+    const struct { uint32_t type; float expect; } cases[] = {
+        {kFogExp, 1.0f - std::exp2(-8.0f * x)},
+        {kFogExp2, 1.0f - std::exp2(-8.0f * x * x)},
+        {kFogBackwardsExp, std::exp2(-8.0f * (1.0f - x))},
+        {kFogBackwardsExp2, std::exp2(-8.0f * (1.0f - x) * (1.0f - x))},
+    };
+    for (const auto& c : cases) {
+        encode_fog_perspective(bp, c.type, 10, 100, 1, 1000, 0);
+        CHECK(std::fabs(fog_factor(decode_fog(bp), z24) - c.expect) < 5e-3f);
+    }
+}
+
+static void test_fog_orthographic() {
+    // GX_SetFog, orthographic: A = (far - near) / (end - start), C = (start - near) / (end - start).
+    const float n = 0.0f, f = 100.0f, start = 20.0f, end = 60.0f;
+    const float A = (f - n) / (end - start), C = (start - n) / (end - start);
+    uint32_t a_bits, c_bits;
+    std::memcpy(&a_bits, &A, 4);
+    std::memcpy(&c_bits, &C, 4);
+    uint32_t bp[256] = {};
+    bp[0xEE] = a_bits >> 12;
+    bp[0xF1] = (kFogLinear << 21) | (1u << 20) | (c_bits >> 12);
+    const FogParams p = decode_fog(bp);
+    CHECK(p.ortho);
+    for (float d : {0.0f, 20.0f, 40.0f, 60.0f, 80.0f}) {  // depth is linear in eye distance
+        const uint32_t z24 = uint32_t((d - n) / (f - n) * 16777215.0f + 0.5f);
+        float expect = (d - start) / (end - start);
+        expect = expect < 0 ? 0 : expect > 1 ? 1 : expect;
+        CHECK(std::fabs(fog_factor(p, z24) - expect) < 1e-3f);
+    }
+}
+
 int main() {
     test_c14x2();
     test_c14x2_out_of_range();
@@ -137,6 +219,9 @@ int main() {
     test_mip_levels();
     test_mip_layout();
     test_lod_fields();
+    test_fog_linear_perspective();
+    test_fog_types();
+    test_fog_orthographic();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

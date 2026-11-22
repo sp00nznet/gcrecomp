@@ -65,4 +65,27 @@ float lod_bias_of(uint32_t mode0);
 inline float min_lod_of(uint32_t mode1) { return float(mode1 & 0xFF) / 16.0f; }
 inline float max_lod_of(uint32_t mode1) { return float((mode1 >> 8) & 0xFF) / 16.0f; }
 
+// ---- Fog --------------------------------------------------------------------------------------
+//
+// BP 0xEE FOG_PARAM_0 (A), 0xEF FOG_PARAM_1 (B magnitude, 24 bits), 0xF0 FOG_PARAM_2 (B shift, 5 bits),
+// 0xF1 FOG_PARAM_3 (C, bit 20 orthographic projection, bits 21-23 fog type), 0xF2 FOG_COLOR (R G B bytes).
+// A and C are floats stored without their low 12 mantissa bits (11 mantissa bits, 8 exponent bits, sign).
+//
+// Not implemented: the range adjustment table (BP 0xE8-0xED, GXSetFogRangeAdj).
+
+constexpr uint32_t kFogOff = 0, kFogLinear = 2, kFogExp = 4, kFogExp2 = 5, kFogBackwardsExp = 6, kFogBackwardsExp2 = 7;
+
+struct FogParams {
+    uint32_t type = kFogOff;
+    bool ortho = false;
+    float a = 0, c = 0;
+    uint32_t b_mag = 0, b_shift = 0;
+    float color[3] = {};  // 0..1
+};
+
+FogParams decode_fog(const uint32_t* bp);
+
+// Fog amount (0 = none, 1 = fully fog colored) for a 24-bit depth value. Mirrors the fragment shader.
+float fog_factor(const FogParams& p, uint32_t z24);
+
 }  // namespace gcrecomp::gp

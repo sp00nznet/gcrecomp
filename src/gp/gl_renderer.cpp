@@ -84,6 +84,9 @@ uniform uvec4 u_stage[16];   // color env, alpha env, tref (map | coord << 3 | e
 uniform ivec4 u_swap[4];     // component selectors r, g, b, a of each swap table
 uniform vec4 u_reg[4];       // PREV, C0, C1, C2
 uniform vec4 u_konst[4];
+uniform vec4 u_fog_f;        // x: A, y: C
+uniform ivec4 u_fog_i;       // x: B magnitude, y: B shift, z: orthographic, w: type (0 off, 2 linear, 4-7 exp)
+uniform vec3 u_fog_color;
 uniform uvec2 u_alpha_cmp;   // x: comparison codes (c0 | c1 << 3 | logic << 6), y: refs (ref0 | ref1 << 8)
 
 vec4 sample_map(int map, vec2 uv) {
@@ -139,6 +142,26 @@ bool compare(uint func, float a, float ref) {
     return true;
 }
 
+// Mirrors fog_factor in gp_decode.cpp.
+float fog_amount() {
+    int type = u_fog_i.w;
+    if (type == 0) return 0.0;
+    int z24 = int(gl_FragCoord.z * 16777215.0 + 0.5);
+    float ze;
+    if (u_fog_i.z != 0) {
+        ze = u_fog_f.x * float(z24) / 16777216.0;
+    } else {
+        int denom = u_fog_i.x - (z24 >> u_fog_i.y);
+        ze = denom != 0 ? u_fog_f.x * 16777216.0 / float(denom) : 1e30;
+    }
+    float f = clamp(ze - u_fog_f.y, 0.0, 1.0);
+    if (type == 4) return 1.0 - exp2(-8.0 * f);
+    if (type == 5) return 1.0 - exp2(-8.0 * f * f);
+    if (type == 6) return exp2(-8.0 * (1.0 - f));
+    if (type == 7) return exp2(-8.0 * (1.0 - f) * (1.0 - f));
+    return f;
+}
+
 void main() {
     vec4 reg[4] = vec4[4](u_reg[0], u_reg[1], u_reg[2], u_reg[3]);
     for (int i = 0; i < u_nstages; ++i) {
@@ -185,6 +208,7 @@ void main() {
         reg[adest].a = alpha;
     }
     vec4 result = vec4(reg[0].rgb, reg[0].a);
+    result.rgb = mix(result.rgb, u_fog_color, fog_amount());
 
     uint c0 = u_alpha_cmp.x & 7u, c1 = (u_alpha_cmp.x >> 3) & 7u, logic = (u_alpha_cmp.x >> 6) & 3u;
     float r0 = float(u_alpha_cmp.y & 255u) / 255.0, r1 = float((u_alpha_cmp.y >> 8) & 255u) / 255.0;
@@ -400,6 +424,12 @@ void apply_state(const State& s) {
     const uint32_t cmp = ((ac >> 16) & 7) | (((ac >> 19) & 7) << 3) | (((ac >> 22) & 3) << 6);
     const uint32_t refs = (ac & 0xFF) | (((ac >> 8) & 0xFF) << 8);
     glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), cmp, refs);
+
+    const FogParams fog = decode_fog(s.bp);
+    glUniform4f(glGetUniformLocation(g_program, "u_fog_f"), fog.a, fog.c, 0.0f, 0.0f);
+    glUniform4i(glGetUniformLocation(g_program, "u_fog_i"), GLint(fog.b_mag), GLint(fog.b_shift), fog.ortho ? 1 : 0,
+                GLint(fog.type));
+    glUniform3fv(glGetUniformLocation(g_program, "u_fog_color"), 1, fog.color);
 
     // Textures: bind the maps the stages use; the others get the white texture.
     bool used[8] = {};
