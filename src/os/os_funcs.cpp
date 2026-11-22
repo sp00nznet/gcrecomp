@@ -110,6 +110,7 @@ static void os_ticks_to_ms(PPCContext* ctx, Memory* mem) {
 
 static void deliver_interrupts(PPCContext* ctx, Memory* mem) {
     if (!sched::interrupts_enabled()) return;
+    sched::poll(ctx, mem);
     ai_poll(ctx, mem);
     dsp_poll(ctx, mem);
 }

@@ -441,6 +441,33 @@ void test_retrace_wait_runs_other_threads() {
     CHECK(log_is({"M1", "L", "M2"}));
 }
 
+void fn_retrace_high(PPCContext* c, Memory*) {
+    LOG("H1");
+    sched::retrace_wait(c, &g_mem, 2000);
+    LOG("H2");
+    c->r[3] = 0;
+}
+
+// A thread that spins (the ADX wait loop) is preempted by a sleeper whose time has come once it polls.
+void test_poll_preempts_spinning_thread() {
+    setup();
+    PPCContext* c = &g_main_ctx;
+    uint32_t h = create(c, 1, fn_retrace_high, 0, 5);
+    call(c, sched::os_resume_thread, h);  // H1, then it sleeps
+    auto t0 = std::chrono::steady_clock::now();
+    while (g_log.size() < 2 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) sched::poll(c, &g_mem);
+    CHECK(log_is({"H1", "H2"}));
+    // Not with interrupts disabled, nor with the scheduler disabled.
+    uint32_t h2 = create(c, 2, fn_retrace_high, 0, 5);
+    g_log.clear();
+    call(c, sched::os_resume_thread, h2);
+    sched::interrupts_exchange(false);
+    t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(20)) sched::poll(c, &g_mem);
+    CHECK(log_is({"H1"}));
+    sched::interrupts_exchange(true);
+}
+
 void fn_int_state(PPCContext* c, Memory*) {
     LOG(sched::interrupts_exchange(false) ? "T-enabled" : "T-disabled");  // a new thread starts enabled
     c->r[3] = 0;
@@ -514,6 +541,7 @@ int main() {
         {"alarm_cancel_and_periodic", test_alarm_cancel_and_periodic},
         {"alarm_waits_for_interrupts", test_alarm_waits_for_interrupts},
         {"retrace_wait_runs_other_threads", test_retrace_wait_runs_other_threads},
+        {"poll_preempts_spinning_thread", test_poll_preempts_spinning_thread},
         {"interrupt_state_is_per_thread", test_interrupt_state_is_per_thread},
         {"detached_exit", test_detached_exit},
         {"suspend_keeps_woken_thread_off", test_suspend_keeps_woken_thread_off},

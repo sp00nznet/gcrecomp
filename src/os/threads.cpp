@@ -517,6 +517,25 @@ void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds) {
     reschedule(op.lk);
 }
 
+void poll(PPCContext* ctx, Memory* mem) {
+    // Stands in for the decrementer and VI retrace interrupts that preempt a thread spinning on a
+    // condition another thread (or an alarm) has to establish. Called from the calls such loops make.
+    thread_local uint32_t calls = 0;
+    if ((++calls & 63) != 0) return;
+    if (!t_int_enabled) return;
+    Op op(ctx, mem);
+    State& s = S();
+    if (s.irq_depth || s.scheduler_disabled > 0) return;
+    auto now = Clock::now();
+    uint64_t ticks = timebase_now();
+    bool due = false;
+    for (auto& [addr, t] : s.threads)
+        if (t->waiting && t->timed && t->wake_at <= now) due = true;
+    for (auto& a : s.alarms)
+        if (a.fire <= ticks) due = true;
+    if (due) reschedule(op.lk);
+}
+
 void reset() {
     State& s = S();
     Lock lk(s.m);

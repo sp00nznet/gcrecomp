@@ -12,8 +12,9 @@
 // Switch points: the blocking calls (OSSleepThread, OSSuspendThread, OSJoinThread, OSLockMutex,
 // OSReceiveMessage, ...), the calls that make another thread ready (OSResumeThread, OSWakeupThread,
 // OSSetThreadPriority, OSUnlockMutex, OSSendMessage, ...), OSYieldThread, OSExitThread, and
-// VIWaitForRetrace. Nothing preempts a thread that never reaches one of them (there is no decrementer
-// interrupt): guest code that busy-waits on a flag set by another thread needs a yield hook.
+// VIWaitForRetrace. A thread that never reaches one of them is not preempted (there is no decrementer
+// interrupt), except through poll(), which the calls a spin loop makes (OSGetTime, DVDGetDriveStatus,
+// OSEnableInterrupts, ...) use to run a sleeper or alarm that has come due.
 //
 // Alarms (OSSetAlarm, ...) are driven by the timebase and their handlers run at a switch point, or while
 // every thread is blocked. A running thread with interrupts disabled does not get them delivered.
@@ -40,6 +41,10 @@ bool interrupts_enabled();
 
 // VIWaitForRetrace's wait: the calling guest thread sleeps `microseconds` while the others run.
 void retrace_wait(PPCContext* ctx, Memory* mem, uint32_t microseconds);
+
+// Lets the scheduler run a timed sleeper or alarm that has come due while the calling thread spins
+// (no decrementer interrupt exists). Cheap: acts on one call in 64, and not with interrupts disabled.
+void poll(PPCContext* ctx, Memory* mem);
 
 // Forget every guest thread, mutex waiter and alarm (cancelling the host threads). The calling host
 // thread becomes the main guest thread again, found through OS_CURRENT_THREAD at the next call. For

@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/threads.h"
 
 namespace gcrecomp {
 
@@ -17,7 +18,11 @@ namespace {
 constexpr uint32_t kStateEnd = 0;  // DVD_STATE_END: idle, last command finished
 
 // DVDGetDriveStatus(void) -> DVD_STATE_END
-void dvd_get_drive_status(PPCContext* ctx, Memory*) { ctx->r[3] = kStateEnd; }
+// Games spin on it (the disc error handler loop), so it is a point where other threads may run.
+void dvd_get_drive_status(PPCContext* ctx, Memory* mem) {
+    sched::poll(ctx, mem);
+    ctx->r[3] = kStateEnd;
+}
 
 // DVDGetCommandBlockStatus(DVDCommandBlock*) -> DVD_STATE_END
 void dvd_get_command_block_status(PPCContext* ctx, Memory*) { ctx->r[3] = kStateEnd; }

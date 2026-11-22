@@ -41,6 +41,7 @@ struct AiState {
     PPCContext* ctx = nullptr;  // context of the poll in progress, for the callback
     Memory* mem = nullptr;
     std::chrono::steady_clock::time_point last_poll{};
+    bool in_poll = false;  // the DMA callback is running
 };
 
 AiState g_ai;
@@ -196,13 +197,18 @@ RecompiledFunc lookup_ai_func(const char* name) {
 
 void ai_poll(PPCContext* ctx, Memory* mem) {
     if (!g_ai.ai || !g_ai.ai->dma_enabled()) return;
+    // The DMA callback can switch guest threads (it wakes one, for instance); the thread that runs next
+    // must not deliver the interrupt again, nor replace the context the callback runs on.
+    if (g_ai.in_poll) return;
     // Called from hot paths (clock reads, interrupt re-enabling): look at the DMA once a millisecond.
     const auto now = std::chrono::steady_clock::now();
     if (now - g_ai.last_poll < std::chrono::milliseconds(1)) return;
     g_ai.last_poll = now;
     g_ai.ctx = ctx;
     g_ai.mem = mem;
+    g_ai.in_poll = true;
     g_ai.ai->poll();
+    g_ai.in_poll = false;
     g_ai.ctx = nullptr;
 }
 
