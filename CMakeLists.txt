@@ -42,6 +42,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/os_funcs.cpp
         src/os/yaz0.cpp
         src/os/rarc.cpp
+        src/os/ai_funcs.cpp
         src/os/ar_funcs.cpp
         src/os/dvd_funcs.cpp
         src/os/gx_funcs.cpp
@@ -50,6 +51,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/rel.cpp
     )
     target_include_directories(gcrecomp_runtime PUBLIC include)
+    target_link_libraries(gcrecomp_runtime PUBLIC gcrecomp_audio)
 
     # GX Graphics (D3D11 backend)
     add_library(gcrecomp_gx STATIC
@@ -73,6 +75,9 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/audio/dsp_decoder.cpp
         src/audio/audio_mixer.cpp
         src/audio/audio_system.cpp
+        src/audio/audio_sink.cpp
+        src/audio/audio_interface.cpp
+        src/audio/sdl_sink.cpp
     )
     target_include_directories(gcrecomp_audio PUBLIC include)
     if(WIN32)
@@ -96,6 +101,11 @@ if(GCRECOMP_BUILD_RUNTIME)
         pkg_check_modules(SDL3 QUIET sdl3)
     endif()
     if(SDL3_FOUND)
+        # Audio output through SDL3 (the null sink is always available).
+        target_compile_definitions(gcrecomp_audio PRIVATE GCRECOMP_HAVE_SDL3)
+        target_include_directories(gcrecomp_audio PRIVATE ${SDL3_INCLUDE_DIRS})
+        target_link_libraries(gcrecomp_audio PUBLIC ${SDL3_LINK_LIBRARIES})
+        target_link_directories(gcrecomp_audio PUBLIC ${SDL3_LIBRARY_DIRS})
         find_package(OpenGL QUIET)
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
@@ -109,6 +119,20 @@ if(GCRECOMP_BUILD_RUNTIME)
     else()
         message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")
     endif()
+endif()
+
+# ===========================================================================
+# Tests (no display, no disc): ctest --test-dir build
+# ===========================================================================
+option(GCRECOMP_BUILD_TESTS "Build the unit tests" ON)
+if(GCRECOMP_BUILD_TESTS AND GCRECOMP_BUILD_RUNTIME)
+    enable_testing()
+    add_executable(gcrecomp_audio_tests tests/audio_tests.cpp)
+    target_link_libraries(gcrecomp_audio_tests PRIVATE gcrecomp_audio)
+    add_test(NAME audio COMMAND gcrecomp_audio_tests)
+    add_executable(gcrecomp_ai_hle_tests tests/ai_hle_tests.cpp)
+    target_link_libraries(gcrecomp_ai_hle_tests PRIVATE gcrecomp_runtime gcrecomp_audio)
+    add_test(NAME ai_hle COMMAND gcrecomp_ai_hle_tests)
 endif()
 
 # ===========================================================================

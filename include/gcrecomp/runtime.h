@@ -313,6 +313,15 @@ extern void (*g_wgp_write)(uint32_t size, uint64_t value);
 // Called once per VIWaitForRetrace, on the game's thread (window events are pumped here).
 extern void (*g_retrace_hook)();
 
+// Delivers the audio interface's pending DMA interrupt (calls the game's AI callback) if it is due. Called at the
+// points where the game could have been interrupted: re-enabling interrupts, retrace waits, clock reads.
+void ai_poll(PPCContext* ctx, Memory* mem);
+
+// Drops all AI state and makes the AI replacements play into `sink` (not owned; null restores the default
+// choice of SDL3 or the null sink). For tests.
+namespace audio { class AudioSink; }
+void ai_hle_reset(audio::AudioSink* sink);
+
 // Per-function counters of calls that reached a native replacement, for diagnosing what a game is doing.
 void hle_count(const char* name);
 void hle_dump(size_t top);  // prints the most called replacements, most first

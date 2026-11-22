@@ -58,6 +58,10 @@ namespace gcrecomp {
 
 static auto g_start_time = std::chrono::high_resolution_clock::now();
 
+// Interrupts do not preempt recompiled code: pending ones (the AI DMA callback) are delivered where
+// the game can be interrupted and polls, if it has interrupts enabled.
+static void deliver_interrupts(PPCContext* ctx, Memory* mem);
+
 // OSGetTime: returns 64-bit timebase ticks (40.5 MHz)
 // Return convention: high 32 bits in r3, low 32 bits in r4
 static void os_get_time(PPCContext* ctx, Memory* mem) {
@@ -66,6 +70,7 @@ static void os_get_time(PPCContext* ctx, Memory* mem) {
     uint64_t ticks = (uint64_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
     ctx->r[3] = (uint32_t)(ticks >> 32);
     ctx->r[4] = (uint32_t)ticks;
+    deliver_interrupts(ctx, mem);
 }
 
 // OSGetTick: returns lower 32-bit of timebase in r3
@@ -73,6 +78,7 @@ static void os_get_tick(PPCContext* ctx, Memory* mem) {
     auto now = std::chrono::high_resolution_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - g_start_time);
     ctx->r[3] = (uint32_t)(elapsed.count() * (hw::TIMEBASE_FREQ_HZ / 1000000.0));
+    deliver_interrupts(ctx, mem);
 }
 
 // OSTicksToMilliseconds helper (the game may inline this, but provided as fallback)
@@ -95,6 +101,10 @@ static void os_ticks_to_ms(PPCContext* ctx, Memory* mem) {
 
 static bool g_interrupts_enabled = true;
 
+static void deliver_interrupts(PPCContext* ctx, Memory* mem) {
+    if (g_interrupts_enabled) ai_poll(ctx, mem);
+}
+
 // OSDisableInterrupts: returns previous state in r3
 static void os_disable_interrupts(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = g_interrupts_enabled ? 1 : 0;
@@ -105,6 +115,7 @@ static void os_disable_interrupts(PPCContext* ctx, Memory* mem) {
 static void os_enable_interrupts(PPCContext* ctx, Memory* mem) {
     ctx->r[3] = g_interrupts_enabled ? 1 : 0;
     g_interrupts_enabled = true;
+    deliver_interrupts(ctx, mem);
 }
 
 // OSRestoreInterrupts: restore from saved state (r3 = saved state)
@@ -112,6 +123,7 @@ static void os_restore_interrupts(PPCContext* ctx, Memory* mem) {
     bool prev = g_interrupts_enabled;
     g_interrupts_enabled = (ctx->r[3] != 0);
     ctx->r[3] = prev ? 1 : 0;
+    deliver_interrupts(ctx, mem);
 }
 
 // =============================================================================
@@ -1026,6 +1038,7 @@ void hle_dump(size_t top) {
 static void vi_wait_for_retrace(PPCContext* ctx, Memory* mem) {
     g_vi_retrace_count++;
     if (g_retrace_hook) g_retrace_hook();
+    deliver_interrupts(ctx, mem);
     std::this_thread::sleep_for(std::chrono::microseconds(16667));
 }
 
@@ -1062,10 +1075,6 @@ static void os_init_system_call_stub(PPCContext* ctx, Memory* mem) {
 
 static void ps_init_stub(PPCContext* ctx, Memory* mem) {
     printf("[OS] PSInit\n");
-}
-
-static void ai_init_stub(PPCContext* ctx, Memory* mem) {
-    printf("[AI] AIInit\n");
 }
 
 static void dsp_init_stub(PPCContext* ctx, Memory* mem) {
@@ -1534,7 +1543,6 @@ static const OSFuncEntry g_os_func_table[] = {
     { "DVDInit",                dvd_init_stub },
     { "__OSInitSystemCall",     os_init_system_call_stub },
     { "PSInit",                 ps_init_stub },
-    { "AIInit",                 ai_init_stub },
     { "DSPInit",                dsp_init_stub },
 
     // --- Memory Card (CARD) ---
@@ -1570,6 +1578,7 @@ void register_os_functions() {
     printf("[OS] %d OS functions registered (will bind to addresses via symbol map)\n", count);
 }
 
+RecompiledFunc lookup_ai_func(const char* name);   // src/os/ai_funcs.cpp
 RecompiledFunc lookup_ar_func(const char* name);   // src/os/ar_funcs.cpp
 RecompiledFunc lookup_dvd_func(const char* name);  // src/os/dvd_funcs.cpp
 RecompiledFunc lookup_gx_func(const char* name);   // src/os/gx_funcs.cpp
@@ -1583,6 +1592,7 @@ RecompiledFunc lookup_os_func(const char* name) {
             return entry->func;
         }
     }
+    if (RecompiledFunc f = lookup_ai_func(name)) return f;
     if (RecompiledFunc f = lookup_ar_func(name)) return f;
     if (RecompiledFunc f = lookup_dvd_func(name)) return f;
     if (RecompiledFunc f = lookup_gx_func(name)) return f;
