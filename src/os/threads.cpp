@@ -15,7 +15,10 @@
 #include <thread>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#include <timeapi.h>
+#else
 #include <pthread.h>
 #endif
 
@@ -334,6 +337,12 @@ void unlock_all_mutexes(uint32_t t_addr) {
 // ---- Entry of an API call --------------------------------------------------------------------------------
 
 void init_main(Memory* mem) {
+#if defined(_WIN32)
+    // The default Windows timer tick is ~15.6 ms, far too coarse for the 1 ms alarms and retrace waits the
+    // scheduler sleeps on; request 1 ms for the lifetime of the process.
+    static const bool timer_resolution = timeBeginPeriod(1) == TIMERR_NOERROR;
+    (void)timer_resolution;
+#endif
     State& s = S();
     s.mem = mem;
     auto t = std::make_shared<GThread>();

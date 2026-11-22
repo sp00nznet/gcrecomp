@@ -63,6 +63,9 @@ if(GCRECOMP_BUILD_RUNTIME)
     target_include_directories(gcrecomp_runtime PUBLIC include)
     find_package(Threads REQUIRED)
     target_link_libraries(gcrecomp_runtime PUBLIC Threads::Threads)
+    if(WIN32)
+        target_link_libraries(gcrecomp_runtime PUBLIC winmm)  # timeBeginPeriod
+    endif()
     target_link_libraries(gcrecomp_runtime PUBLIC gcrecomp_audio)
 
     # GX Graphics (D3D11 backend)
