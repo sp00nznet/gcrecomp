@@ -15,6 +15,7 @@
 #include "gcrecomp/runtime.h"
 #include "gp_internal.h"
 #include "input.h"
+#include "lighting.h"
 
 namespace gcrecomp::gp {
 
@@ -442,7 +443,6 @@ private:
         float mat_color[2][4];
         unpack_rgba8(s.xf[0x100C], mat_color[0]);
         unpack_rgba8(s.xf[0x100D], mat_color[1]);
-        const bool chan_vertex[2] = {(s.xf[0x100E] & 1) != 0, (s.xf[0x100F] & 1) != 0};
 
         const uint32_t num_texgens = s.bp[0x00] & 0xF;
         const uint8_t* p = data;
@@ -477,14 +477,22 @@ private:
                 const uint8_t* q = fetch(l.pos, 0, l.pos_cnt * csize);
                 for (uint32_t i = 0; i < l.pos_cnt; ++i) pos[i] = read_component(q + i * csize, l.pos_fmt, l.pos_shift);
             }
-            if (l.nrm != kNone) fetch(l.nrm, 1, l.nrm_cnt * comp_size(l.nrm_fmt));  // normals are not used yet
+            // Normal (the first three components; binormal and tangent of NBT are not used).
+            float nrm[3] = {0, 0, 0};
+            if (l.nrm != kNone) {
+                const uint32_t csize = comp_size(l.nrm_fmt);
+                const uint8_t* q = fetch(l.nrm, 1, l.nrm_cnt * csize);
+                const uint32_t shift = l.nrm_fmt >= 4 ? 0 : (csize == 1 ? 6 : 14);
+                for (uint32_t i = 0; i < 3; ++i) nrm[i] = read_component(q + i * csize, l.nrm_fmt, shift);
+            }
 
+            // Vertex colors; the material registers stand in where the vertex has none.
             float color[2][4];
             for (int c = 0; c < 2; ++c) {
                 std::memcpy(color[c], mat_color[c], sizeof(color[c]));
                 if (l.col[c] != kNone) {
                     const uint8_t* q = fetch(l.col[c], 2 + c, color_size(l.col_fmt[c]));
-                    if (chan_vertex[c]) read_color(q, l.col_fmt[c], color[c]);
+                    read_color(q, l.col_fmt[c], color[c]);
                 }
             }
 
@@ -520,12 +528,17 @@ private:
             }
             const float zgc = cw != 0.0f ? cz / cw : 0.0f;
             const float depth = (far_z + zgc * z_range) / 16777215.0f;
+            // Channel colors: material and ambient sources, lights (XF color/alpha channels).
+            float lit[2][4];
+            float view_nrm[3];
+            transform_normal(s.xf, pos_mtx, nrm, view_nrm);
+            light_vertex(s.xf, color, view, view_nrm, lit);
             out[0] = cx;
             out[1] = cy;
             out[2] = (2.0f * depth - 1.0f) * cw;
             out[3] = cw;
-            std::memcpy(out + 4, color[0], sizeof(float) * 4);
-            std::memcpy(out + 8, color[1], sizeof(float) * 4);
+            std::memcpy(out + 4, lit[0], sizeof(float) * 4);
+            std::memcpy(out + 8, lit[1], sizeof(float) * 4);
 
             // Texture coordinates: texgen i reads its source row and applies a 2x4 or 3x4 matrix.
             for (uint32_t i = 0; i < 8; ++i) {
