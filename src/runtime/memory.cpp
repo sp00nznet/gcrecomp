@@ -22,6 +22,10 @@
 // =============================================================================
 
 #include "gcrecomp/runtime.h"
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 #include "gcrecomp/interrupts.h"
 #include "gcrecomp/hw/dsp.h"
 #include "gcrecomp/threads.h"
@@ -39,6 +43,59 @@ static inline bool is_dsp_reg(uint32_t addr) {
     return addr - DspInterface::kBase < DspInterface::kSize;
 }
 
+static constexpr uint32_t kPhysMask = 0x03FFFFFF;  // cached and uncached mirrors of the same RAM compare equal
+
+// GCRECOMP_WATCH=0xADDR:LEN[,0xADDR:LEN...]; GCRECOMP_WATCH_MAX=N limits the lines printed (default 64).
+static void parse_watch(Memory& m) {
+    const char* env = getenv("GCRECOMP_WATCH");
+    if (!env || !*env) return;
+    const char* p = env;
+    while (*p && m.watch_count < 8) {
+        char* end = nullptr;
+        const unsigned long addr = strtoul(p, &end, 0);
+        unsigned long len = 4;
+        if (*end == ':') {
+            len = strtoul(end + 1, &end, 0);
+        }
+        if (end == p) break;
+        m.watch_lo[m.watch_count] = static_cast<uint32_t>(addr) & kPhysMask;
+        m.watch_hi[m.watch_count] = (static_cast<uint32_t>(addr) & kPhysMask) + static_cast<uint32_t>(len ? len : 1);
+        std::fprintf(stderr, "[watch] 0x%08lX..0x%08lX\n", addr, addr + (len ? len : 1));
+        ++m.watch_count;
+        p = *end == ',' ? end + 1 : end;
+        if (*end != ',') break;
+    }
+}
+
+// Any function of the executable: dladdr() on it gives the load address the call-chain offsets are relative to.
+static void watch_anchor() {}
+
+void Memory::watch_hit(uint32_t addr, uint32_t len, uint64_t value) {
+    const uint32_t lo = addr & kPhysMask, hi = lo + len;
+    bool hit = false;
+    for (uint32_t i = 0; i < watch_count; ++i) hit |= lo < watch_hi[i] && hi > watch_lo[i];
+    if (!hit || !debug_armed()) return;
+    static const unsigned long limit = [] {
+        const char* v = getenv("GCRECOMP_WATCH_MAX");
+        return v && *v ? strtoul(v, nullptr, 0) : 64ul;
+    }();
+    static unsigned long hits = 0;
+    if (hits++ >= limit) return;
+    std::fprintf(stderr, "[watch] #%lu write%u 0x%08X = 0x%llX", hits, len * 8, addr, (unsigned long long)value);
+#if defined(__linux__)
+    // The host call chain as offsets in the executable: tools/guest-watch.py turns them into func_XXXXXXXX names.
+    void* frames[16];
+    const int n = backtrace(frames, 16);
+    Dl_info info;
+    if (n > 0 && dladdr(reinterpret_cast<void*>(&watch_anchor), &info)) {
+        std::fprintf(stderr, " bt:");
+        for (int i = 1; i < n; ++i)
+            std::fprintf(stderr, " %llX", (unsigned long long)((char*)frames[i] - (char*)info.dli_fbase));
+    }
+#endif
+    std::fprintf(stderr, "\n");
+}
+
 bool Memory::init(uint32_t size) {
     ram_size = size;
     ram_end = MAIN_RAM_BASE + ram_size;
@@ -49,6 +106,7 @@ bool Memory::init(uint32_t size) {
         return false;
     }
     printf("[Memory] Allocated %u MB main RAM\n", ram_size / (1024 * 1024));
+    parse_watch(*this);
     return true;
 }
 
@@ -295,6 +353,7 @@ void (*g_wgp_write)(uint32_t size, uint64_t value) = nullptr;
 static constexpr uint32_t kWgpAddr = 0xCC008000;
 
 void Memory::write8(uint32_t addr, uint8_t val) {
+    watch_check(addr, 1, val);
     if (addr == kWgpAddr && g_wgp_write) {
         g_wgp_write(1, val);
         return;
@@ -303,6 +362,7 @@ void Memory::write8(uint32_t addr, uint8_t val) {
 }
 
 void Memory::write16(uint32_t addr, uint16_t val) {
+    watch_check(addr, 2, val);
     if (addr == kWgpAddr && g_wgp_write) {
         g_wgp_write(2, val);
         return;
@@ -321,6 +381,7 @@ void Memory::write16(uint32_t addr, uint16_t val) {
 }
 
 void Memory::write32(uint32_t addr, uint32_t val) {
+    watch_check(addr, 4, val);
     if (addr == kWgpAddr && g_wgp_write) {
         g_wgp_write(4, val);
         return;

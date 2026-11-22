@@ -254,6 +254,17 @@ struct Memory {
     void write64(uint32_t addr, uint64_t val);
     void writef32(uint32_t addr, float val);
     void writef64(uint32_t addr, double val);
+
+    // Write watch (GCRECOMP_WATCH=0xADDR:LEN[,0xADDR:LEN...], read by init()): every store that overlaps one of the
+    // ranges prints a line with the value and the host call chain (see tools/guest-watch.py). A store costs one
+    // test of watch_count when nothing is watched.
+    uint32_t watch_count = 0;
+    uint32_t watch_lo[8] = {};
+    uint32_t watch_hi[8] = {};  // exclusive
+    void watch_hit(uint32_t addr, uint32_t len, uint64_t value);
+    void watch_check(uint32_t addr, uint32_t len, uint64_t value) {
+        if (watch_count) watch_hit(addr, len, value);
+    }
 };
 
 // =============================================================================
@@ -291,6 +302,10 @@ struct FuncTable {
 // but `addr` repeats, it is looping over a call.
 // Returns the dispatch sequence number; `addr`/`lr` may be null.
 uint64_t last_dispatch(uint32_t* addr, uint32_t* lr);
+
+// Debug facilities that are timed (GCRECOMP_WATCH, GCRECOMP_TRACE_CALLS) only act once GCRECOMP_DEBUG_AFTER seconds
+// of wall-clock time have passed since the first call (default 0: always), to skip a boot phase or an earlier scene.
+bool debug_armed();
 
 // =============================================================================
 // Global runtime state

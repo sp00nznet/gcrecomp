@@ -86,6 +86,47 @@ namespace gcrecomp {
     }
 
     void PPCToCEmitter::emit_insn(const PPCInsn& insn) {
+        // The OE forms (addo, subfo, nego, mullwo, divwo ...) also set XER[OV] (and the sticky SO). The overflow is
+        // computed from the operands as they were before the operation (rD may be rA or rB), then CR0 follows when
+        // Rc is set, so it sees the new SO.
+        if (insn.oe) {
+            PPCInsn plain = insn;
+            plain.oe = false;
+            plain.rc = false;
+            const char* x = nullptr;  // the two addends of rD = x + y + carry-in; overflow = signed overflow of that sum
+            const char* y = "0";
+            switch (insn.type) {
+            case PPCInsnType::ADD: case PPCInsnType::ADDC: case PPCInsnType::ADDE: x = "oe_a"; y = "oe_b"; break;
+            case PPCInsnType::ADDZE: x = "oe_a"; y = "0u"; break;
+            case PPCInsnType::ADDME: x = "oe_a"; y = "0xFFFFFFFFu"; break;
+            case PPCInsnType::SUBF: case PPCInsnType::SUBFC: case PPCInsnType::SUBFE: x = "~oe_a"; y = "oe_b"; break;
+            case PPCInsnType::SUBFZE: x = "~oe_a"; y = "0u"; break;
+            case PPCInsnType::SUBFME: x = "~oe_a"; y = "0xFFFFFFFFu"; break;
+            case PPCInsnType::NEG: x = "~oe_a"; y = "0u"; break;
+            default: break;
+            }
+            const char* ov = nullptr;
+            if (x) {
+                static char buf[96];
+                std::snprintf(buf, sizeof buf, "(((%s ^ r) & (%s ^ r)) >> 31) != 0", x, y);
+                ov = buf;
+            } else if (insn.type == PPCInsnType::MULLW) {
+                ov = "(int64_t)(int32_t)oe_a * (int64_t)(int32_t)oe_b != (int64_t)(int32_t)r";
+            } else if (insn.type == PPCInsnType::DIVW) {
+                ov = "oe_b == 0 || (oe_a == 0x80000000u && oe_b == 0xFFFFFFFFu)";
+            } else if (insn.type == PPCInsnType::DIVWU) {
+                ov = "oe_b == 0";
+            }
+            if (ov) {
+                emit("{ [[maybe_unused]] const uint32_t oe_a = ctx->r[%u], oe_b = ctx->r[%u];", insn.ra, insn.rb);
+                emit_insn(plain);
+                emit("  { const uint32_t r = ctx->r[%u]; ctx->set_xer_ov(%s); }", insn.rd, ov);
+                if (insn.rc) emit("  ctx->update_cr0((int32_t)ctx->r[%u]);", insn.rd);
+                emit("}");
+                return;
+            }
+        }
+
         // Comment with original instruction
         emit("// 0x%08X: %s", insn.address, insn.mnemonic.c_str());
 
@@ -458,7 +499,7 @@ namespace gcrecomp {
 
         // Load byte-reversed
         case PPCInsnType::LHBRX:
-            emit("{ uint16_t v = MEM_READ16(%s + ctx->r[%u]); ctx->r[%u] = (v >> 8) | (v << 8); }",
+            emit("{ uint16_t v = MEM_READ16(%s + ctx->r[%u]); ctx->r[%u] = (uint32_t)(uint16_t)((v >> 8) | (v << 8)); }",
                  insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb, insn.rd);
             break;
         case PPCInsnType::LWBRX:
@@ -564,7 +605,7 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::STFS:
-            emit("MEM_WRITEF32(%s + %d, (float)ctx->f[%u]);",
+            emit("MEM_WRITEF32(%s + %d, ppc_double_to_single(ctx->f[%u]));",
                  insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.simm, insn.rs);
             break;
 
@@ -583,7 +624,7 @@ namespace gcrecomp {
                  insn.ra, insn.simm, insn.rd, insn.ra);
             break;
         case PPCInsnType::STFSU:
-            emit("{ uint32_t ea = ctx->r[%u] + %d; MEM_WRITEF32(ea, (float)ctx->f[%u]); ctx->r[%u] = ea; }",
+            emit("{ uint32_t ea = ctx->r[%u] + %d; MEM_WRITEF32(ea, ppc_double_to_single(ctx->f[%u])); ctx->r[%u] = ea; }",
                  insn.ra, insn.simm, insn.rs, insn.ra);
             break;
         case PPCInsnType::STFDU:
@@ -601,7 +642,7 @@ namespace gcrecomp {
                  insn.rd, insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb);
             break;
         case PPCInsnType::STFSX:
-            emit("MEM_WRITEF32(%s + ctx->r[%u], (float)ctx->f[%u]);",
+            emit("MEM_WRITEF32(%s + ctx->r[%u], ppc_double_to_single(ctx->f[%u]));",
                  insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb, insn.rs);
             break;
         // stfiwx: the low word of the register's 64 bits, as an integer (the result of fctiwz)
@@ -624,7 +665,7 @@ namespace gcrecomp {
                  insn.ra, insn.ra, insn.rb, insn.rd, insn.ra);
             break;
         case PPCInsnType::STFSUX:
-            emit("{ uint32_t ea = ctx->r[%u] + ctx->r[%u]; MEM_WRITEF32(ea, (float)ctx->f[%u]); ctx->r[%u] = ea; }",
+            emit("{ uint32_t ea = ctx->r[%u] + ctx->r[%u]; MEM_WRITEF32(ea, ppc_double_to_single(ctx->f[%u])); ctx->r[%u] = ea; }",
                  insn.ra, insn.rb, insn.rs, insn.ra);
             break;
         case PPCInsnType::STFDUX:
@@ -662,28 +703,28 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::FMADDS:
-            emit_fs(*this, insn.rd, "ctx->f[%u] * ctx->f[%u] + ctx->f[%u]", insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "std::fma(ctx->f[%u], ctx->f[%u], ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMSUBS:
-            emit_fs(*this, insn.rd, "ctx->f[%u] * ctx->f[%u] - ctx->f[%u]", insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "std::fma(ctx->f[%u], ctx->f[%u], -ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMSUBS:
-            emit_fs(*this, insn.rd, "-(ctx->f[%u] * ctx->f[%u] - ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "-std::fma(ctx->f[%u], ctx->f[%u], -ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMADDS:
-            emit_fs(*this, insn.rd, "-(ctx->f[%u] * ctx->f[%u] + ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
+            emit_fs(*this, insn.rd, "-std::fma(ctx->f[%u], ctx->f[%u], ctx->f[%u])", insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMADD:
-            emit("ctx->f[%u] = ctx->f[%u] * ctx->f[%u] + ctx->f[%u];", insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit("ctx->f[%u] = std::fma(ctx->f[%u], ctx->f[%u], ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FMSUB:
-            emit("ctx->f[%u] = ctx->f[%u] * ctx->f[%u] - ctx->f[%u];", insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit("ctx->f[%u] = std::fma(ctx->f[%u], ctx->f[%u], -ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMADD:
-            emit("ctx->f[%u] = -(ctx->f[%u] * ctx->f[%u] + ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit("ctx->f[%u] = -std::fma(ctx->f[%u], ctx->f[%u], ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
         case PPCInsnType::FNMSUB:
-            emit("ctx->f[%u] = -(ctx->f[%u] * ctx->f[%u] - ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
+            emit("ctx->f[%u] = -std::fma(ctx->f[%u], ctx->f[%u], -ctx->f[%u]);", insn.rd, insn.ra, insn.rc_reg, insn.rb);
             break;
 
         case PPCInsnType::FRES:
@@ -850,8 +891,8 @@ namespace gcrecomp {
             emit("{ uint32_t ea = %s;", ea);
             if (update) emit("  ctx->r[%u] = ea;", insn.ra);
             if (store) {
-                if (insn.psq_w) emit("  PSQ_STORE_ONE((float)ctx->f[%u], ea, ctx->gqr[%u]);", reg, insn.psq_i);
-                else emit("  PSQ_STORE_PAIR((float)ctx->f[%u], ctx->ps1[%u], ea, ctx->gqr[%u]);", reg, reg, insn.psq_i);
+                if (insn.psq_w) emit("  PSQ_STORE_ONE(ppc_double_to_single(ctx->f[%u]), ea, ctx->gqr[%u]);", reg, insn.psq_i);
+                else emit("  PSQ_STORE_PAIR(ppc_double_to_single(ctx->f[%u]), ctx->ps1[%u], ea, ctx->gqr[%u]);", reg, reg, insn.psq_i);
             } else if (insn.psq_w) {
                 emit("  float v0 = PSQ_LOAD_ONE(ea, ctx->gqr[%u]); ctx->f[%u] = (double)v0; ctx->ps1[%u] = 1.0f;",
                      insn.psq_i, reg, reg);
@@ -1079,8 +1120,8 @@ namespace gcrecomp {
             break;
 
         case PPCInsnType::DCBZ:
-            emit("std::memset((void*)((uintptr_t)mem->translate(ctx->r[%u] + ctx->r[%u]) & ~31), 0, 32); // dcbz",
-                 insn.ra, insn.rb);
+            emit("{ uint32_t ea = %s + ctx->r[%u]; std::memset(mem->translate(ea & ~31u), 0, 32); } // dcbz",
+                 insn.ra ? (std::string("ctx->r[") + std::to_string(insn.ra) + "]").c_str() : "0", insn.rb);
             break;
 
         default:

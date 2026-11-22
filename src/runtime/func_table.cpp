@@ -21,7 +21,9 @@
 
 #include "gcrecomp/runtime.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <vector>
 
@@ -116,12 +118,52 @@ uint64_t last_dispatch(uint32_t* addr, uint32_t* lr) {
     return g_dispatch_seq.load(std::memory_order_relaxed);
 }
 
+static const auto g_debug_start = std::chrono::steady_clock::now();
+
+bool debug_armed() {
+    static const double after = [] {
+        const char* v = std::getenv("GCRECOMP_DEBUG_AFTER");
+        return v && *v ? std::atof(v) : 0.0;
+    }();
+    return after <= 0 || std::chrono::duration<double>(std::chrono::steady_clock::now() - g_debug_start).count() >= after;
+}
+
+// GCRECOMP_TRACE_CALLS=LR[,LR...] (hex link-register values, e.g. the address after a `bl` thunk that jumps through
+// a pointer): prints the target of every indirect call made with one of them and r3-r6 (GCRECOMP_TRACE_CALLS_MAX
+// lines, default 20; GCRECOMP_DEBUG_AFTER=S skips the first S seconds). Finds out which method a vtable or callback
+// pointer resolves to at run time.
+static void trace_call(uint32_t gc_addr, const PPCContext* ctx) {
+    static const std::vector<uint32_t> lrs = [] {
+        std::vector<uint32_t> v;
+        const char* e = std::getenv("GCRECOMP_TRACE_CALLS");
+        while (e && *e) {
+            char* end = nullptr;
+            const unsigned long x = std::strtoul(e, &end, 16);
+            if (end == e) break;
+            v.push_back(static_cast<uint32_t>(x));
+            e = *end == ',' ? end + 1 : end;
+            if (*end != ',') break;
+        }
+        return v;
+    }();
+    if (lrs.empty() || std::find(lrs.begin(), lrs.end(), ctx->lr) == lrs.end() || !debug_armed()) return;
+    static const unsigned long limit = [] {
+        const char* v = std::getenv("GCRECOMP_TRACE_CALLS_MAX");
+        return v && *v ? std::strtoul(v, nullptr, 0) : 20ul;
+    }();
+    static unsigned long printed = 0;
+    if (printed++ >= limit) return;
+    std::fprintf(stderr, "[calls] LR=0x%08X -> 0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X\n", ctx->lr, gc_addr, ctx->r[3],
+                 ctx->r[4], ctx->r[5], ctx->r[6]);
+}
+
 void FuncTable::call(uint32_t gc_addr, PPCContext* ctx, Memory* mem) const {
     if (gc_addr == 0) return; // Null function pointer — skip silently
 
     g_dispatch_addr.store(gc_addr, std::memory_order_relaxed);
     g_dispatch_lr.store(ctx->lr, std::memory_order_relaxed);
     g_dispatch_seq.fetch_add(1, std::memory_order_relaxed);
+    trace_call(gc_addr, ctx);
 
     // Basic sanity check: must be in GameCube RAM range and 4-byte aligned.
     // Valid code addresses are 0x80000000 - 0x82FFFFFF (up to 48 MB for Triforce).

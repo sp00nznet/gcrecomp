@@ -52,3 +52,19 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure
+
+  # The emitted code against a reference PowerPC CPU (Unicorn from PyPI), see tools/ppc-diff/README.md. A separate job so
+  # that the build above never needs Python packages; the vectors are generated deterministically here (not committed).
+  ppc-diff:
+    name: Recompiler vs Unicorn
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev libasound2-dev libgl-dev
+      - name: Run ppc-diff
+        env:
+          PPC_DIFF_CMAKE_ARGS: -DGCRECOMP_FETCH_SDL3=ON
+        run: tools/ppc-diff/run.sh --build-dir "$RUNNER_TEMP/ppc-diff" --scale 0.5

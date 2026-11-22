@@ -279,6 +279,21 @@ if(GCRECOMP_BUILD_TOOLS)
             target_include_directories(ps_semantics_test PRIVATE include tests ${CMAKE_CURRENT_BINARY_DIR})
             target_link_libraries(ps_semantics_test PRIVATE gcrecomp_runtime)
             add_test(NAME ps_semantics COMMAND ps_semantics_test)
+            # ppc-diff: the code the recompiler emits against a reference CPU (Unicorn), see tools/ppc-diff/README.md.
+            # Needs a vectors file (tools/ppc-diff/gen_vectors.py), so it only builds when one is given.
+            set(GCRECOMP_PPC_DIFF_VECTORS "" CACHE FILEPATH "Vectors file for the ppc_diff differential test")
+            if(GCRECOMP_PPC_DIFF_VECTORS)
+                add_executable(ppc_diff_gen tools/ppc-diff/ppc_diff_gen.cpp)
+                target_link_libraries(ppc_diff_gen PRIVATE gcrecomp_tools)
+                add_custom_command(
+                    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ppc_diff_cases.inc
+                    COMMAND ppc_diff_gen ${GCRECOMP_PPC_DIFF_VECTORS} ${CMAKE_CURRENT_BINARY_DIR}/ppc_diff_cases.inc
+                    DEPENDS ppc_diff_gen ${GCRECOMP_PPC_DIFF_VECTORS})
+                add_executable(ppc_diff_run tools/ppc-diff/ppc_diff_run.cpp ${CMAKE_CURRENT_BINARY_DIR}/ppc_diff_cases.inc)
+                target_include_directories(ppc_diff_run PRIVATE include ${CMAKE_CURRENT_BINARY_DIR})
+                target_link_libraries(ppc_diff_run PRIVATE gcrecomp_runtime)
+                add_test(NAME ppc_diff COMMAND ppc_diff_run)
+            endif()
         endif()
     endif()
 endif()

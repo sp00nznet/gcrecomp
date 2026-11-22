@@ -1,0 +1,2 @@
+# Python packages of tools/ppc-diff (installed into a virtual environment by tools/ppc-diff/run.sh).
+unicorn>=2.1

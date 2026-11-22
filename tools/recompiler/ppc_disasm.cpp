@@ -56,10 +56,10 @@ static PPCInsn decode_op4(uint32_t raw, uint32_t addr) {
         case 560: insn.type = PPCInsnType::PS_MERGE01; insn.mnemonic = "ps_merge01"; return insn;
         case 592: insn.type = PPCInsnType::PS_MERGE10; insn.mnemonic = "ps_merge10"; return insn;
         case 624: insn.type = PPCInsnType::PS_MERGE11; insn.mnemonic = "ps_merge11"; return insn;
-        case 0:   insn.type = PPCInsnType::PS_CMPU0;   insn.mnemonic = "ps_cmpu0"; return insn;
-        case 32:  insn.type = PPCInsnType::PS_CMPO0;   insn.mnemonic = "ps_cmpo0"; return insn;
-        case 64:  insn.type = PPCInsnType::PS_CMPU1;   insn.mnemonic = "ps_cmpu1"; return insn;
-        case 96:  insn.type = PPCInsnType::PS_CMPO1;   insn.mnemonic = "ps_cmpo1"; return insn;
+        case 0:   insn.type = PPCInsnType::PS_CMPU0;   insn.mnemonic = "ps_cmpu0"; insn.crfd = PPC_CRFD(raw); return insn;
+        case 32:  insn.type = PPCInsnType::PS_CMPO0;   insn.mnemonic = "ps_cmpo0"; insn.crfd = PPC_CRFD(raw); return insn;
+        case 64:  insn.type = PPCInsnType::PS_CMPU1;   insn.mnemonic = "ps_cmpu1"; insn.crfd = PPC_CRFD(raw); return insn;
+        case 96:  insn.type = PPCInsnType::PS_CMPO1;   insn.mnemonic = "ps_cmpo1"; insn.crfd = PPC_CRFD(raw); return insn;
         case 24:  insn.type = PPCInsnType::PS_RES;     insn.mnemonic = "ps_res"; return insn;
         case 26:  insn.type = PPCInsnType::PS_RSQRTE;  insn.mnemonic = "ps_rsqrte"; return insn;
         default: break;
@@ -329,7 +329,8 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         case 449: insn.type = PPCInsnType::CROR;   insn.mnemonic = "cror"; break;
         case 417: insn.type = PPCInsnType::CRORC;  insn.mnemonic = "crorc"; break;
         case 193: insn.type = PPCInsnType::CRXOR;  insn.mnemonic = "crxor"; break;
-        case 0:   insn.type = PPCInsnType::MCRF;   insn.mnemonic = "mcrf"; break;
+        case 0:   insn.type = PPCInsnType::MCRF;   insn.mnemonic = "mcrf";
+                  insn.crfd = PPC_CRFD(raw); insn.crfs = PPC_CRFS(raw); break;
         case 150: insn.type = PPCInsnType::ISYNC;  insn.mnemonic = "isync"; break;
         case 50:  insn.type = PPCInsnType::RFI;    insn.mnemonic = "rfi"; break;
         default:  insn.type = PPCInsnType::UNKNOWN; insn.mnemonic = "op19_???";
@@ -342,7 +343,17 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         uint32_t xo = PPC_XO(raw);
         insn.rd = PPC_RD(raw); insn.rs = PPC_RD(raw);
         insn.ra = PPC_RA(raw); insn.rb = PPC_RB(raw);
-        insn.rc = PPC_RC_FLAG(raw); insn.oe = PPC_OE(raw);
+        insn.rc = PPC_RC_FLAG(raw); insn.oe = false;
+        // The OE (overflow enable) forms of the XO-form arithmetic instructions (addo, subfo, nego, mullwo, divwo ...)
+        // carry bit 0x200 in the 10-bit extended opcode; mulhw/mulhwu have no OE form.
+        if (xo & 0x200) {
+            switch (xo & 0x1FF) {
+            case 266: case 10: case 138: case 202: case 234: case 40: case 8: case 136: case 200: case 232:
+            case 104: case 235: case 491: case 459:
+                xo &= 0x1FF; insn.oe = true; break;
+            default: break;
+            }
+        }
 
         switch (xo) {
         case 266: insn.type = PPCInsnType::ADD;    insn.mnemonic = "add"; break;
@@ -353,8 +364,8 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         case 40:  insn.type = PPCInsnType::SUBF;   insn.mnemonic = "subf"; break;
         case 8:   insn.type = PPCInsnType::SUBFC;  insn.mnemonic = "subfc"; break;
         case 136: insn.type = PPCInsnType::SUBFE;  insn.mnemonic = "subfe"; break;
-        case 232: insn.type = PPCInsnType::SUBFZE; insn.mnemonic = "subfze"; break;
-        case 200: insn.type = PPCInsnType::SUBFME; insn.mnemonic = "subfme"; break;
+        case 200: insn.type = PPCInsnType::SUBFZE; insn.mnemonic = "subfze"; break;
+        case 232: insn.type = PPCInsnType::SUBFME; insn.mnemonic = "subfme"; break;
         case 104: insn.type = PPCInsnType::NEG;    insn.mnemonic = "neg"; break;
         case 235: insn.type = PPCInsnType::MULLW;  insn.mnemonic = "mullw"; break;
         case 75:  insn.type = PPCInsnType::MULHW;  insn.mnemonic = "mulhw"; break;
@@ -442,6 +453,7 @@ PPCInsn ppc_disasm(uint32_t raw, uint32_t address) {
         case 4:   insn.type = PPCInsnType::TW;     insn.mnemonic = "tw"; break;
         default:  insn.type = PPCInsnType::UNKNOWN; insn.mnemonic = "op31_???";
         }
+        if (insn.oe) insn.mnemonic += "o";
         break;
     }
 

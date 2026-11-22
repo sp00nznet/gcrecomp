@@ -27,6 +27,13 @@ Switches and tools for finding out why a frame looks wrong. Nothing here needs a
 * `tests/ps_semantics_*`: the floating-point and paired-single semantics of the code the recompiler emits
   (see below). Add an instruction by listing its word in `tests/ps_semantics_cases.h` and its expectation in
   `tests/ps_semantics_test.cpp`.
+* `tools/ppc-diff/run.sh`: differential test of the recompiler's emitted code against a reference PowerPC CPU
+  (Unicorn) on random integer / CR / FP / paired-single / load-store vectors, see `tools/ppc-diff/README.md`. Run it
+  after touching `tools/recompiler/ppc_to_c.cpp` or `ppc_disasm.cpp`, and whenever a game does something subtly
+  wrong (a silent audio channel, a slightly wrong value) with no visible crash: a recompiler instruction bug is
+  the usual cause.
+* `tools/wav-channels.py A.wav [B.wav ...]`: per-channel RMS, L-R and the share of identical samples per time bin
+  of a stereo WAV (`GCRECOMP_DUMP_AUDIO` or Dolphin's dumps), with a verdict mono / left only / right only / stereo.
 
 ## Reference frames from Dolphin
 

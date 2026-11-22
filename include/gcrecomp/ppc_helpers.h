@@ -85,19 +85,19 @@ inline uint32_t PPC_MFTBU() {
 // These implement the quantized load/store operations used by the Gekko's
 // paired-single instructions (psq_l, psq_st, etc.). The GQR (Graphics
 // Quantization Register) encodes the data type and scale factor:
-//   Load:  type = bits [2:0], scale = bits [13:8]
-//   Store: type = bits [18:16], scale = bits [29:24]
+//   Store: type = bits [2:0],   scale = bits [13:8]
+//   Load:  type = bits [18:16], scale = bits [29:24]
 //
 // Each function takes a Memory& parameter; the auto-generated recomp_common.h
 // defines wrapper macros (PSQ_LOAD_ONE, etc.) that pass g_mem.
 // =============================================================================
 
-// Quantization types from GQR
+// Quantization types from GQR (the Gekko encoding: 100 u8, 101 u16, 110 s8, 111 s16; 0-3 float)
 enum PSQ_Type : uint32_t {
     PSQ_TYPE_FLOAT = 0,
     PSQ_TYPE_U8    = 4,
-    PSQ_TYPE_S8    = 5,
-    PSQ_TYPE_U16   = 6,
+    PSQ_TYPE_U16   = 5,
+    PSQ_TYPE_S8    = 6,
     PSQ_TYPE_S16   = 7,
 };
 
@@ -107,8 +107,8 @@ inline float psq_scale(uint32_t field) { return std::ldexp(1.0f, static_cast<int
 inline float psq_dequant(uint32_t raw, uint32_t type, float inv_scale_exp) {
     switch (type) {
         case PSQ_TYPE_U8:  return static_cast<float>(static_cast<uint8_t>(raw)) * inv_scale_exp;
-        case PSQ_TYPE_S8:  return static_cast<float>(static_cast<int8_t>(raw)) * inv_scale_exp;
         case PSQ_TYPE_U16: return static_cast<float>(static_cast<uint16_t>(raw)) * inv_scale_exp;
+        case PSQ_TYPE_S8:  return static_cast<float>(static_cast<int8_t>(raw)) * inv_scale_exp;
         default:           return static_cast<float>(static_cast<int16_t>(raw)) * inv_scale_exp;
     }
 }
@@ -119,8 +119,8 @@ inline uint32_t psq_quant(float v, uint32_t type, float mul) {
     float lo, hi;
     switch (type) {
         case PSQ_TYPE_U8:  lo = 0.0f;      hi = 255.0f;   break;
-        case PSQ_TYPE_S8:  lo = -128.0f;   hi = 127.0f;   break;
         case PSQ_TYPE_U16: lo = 0.0f;      hi = 65535.0f; break;
+        case PSQ_TYPE_S8:  lo = -128.0f;   hi = 127.0f;   break;
         default:           lo = -32768.0f; hi = 32767.0f; break;
     }
     float t = v * mul;
@@ -151,13 +151,13 @@ inline float psq_load_elem(gcrecomp::Memory& mem, uint32_t addr, uint32_t type, 
 }
 
 inline float psq_load_one(gcrecomp::Memory& mem, uint32_t addr, uint32_t gqr) {
-    const uint32_t type = gqr & 0x7;
-    return psq_load_elem(mem, addr, type, 1.0f / psq_scale((gqr >> 8) & 0x3F));
+    const uint32_t type = (gqr >> 16) & 0x7;
+    return psq_load_elem(mem, addr, type, 1.0f / psq_scale((gqr >> 24) & 0x3F));
 }
 
 inline void psq_load_pair(gcrecomp::Memory& mem, float* ps0, float* ps1, uint32_t addr, uint32_t gqr) {
-    const uint32_t type = gqr & 0x7;
-    const float inv = 1.0f / psq_scale((gqr >> 8) & 0x3F);
+    const uint32_t type = (gqr >> 16) & 0x7;
+    const float inv = 1.0f / psq_scale((gqr >> 24) & 0x3F);
     const uint32_t step = type < PSQ_TYPE_U8 ? 4 : psq_elem_size(type);
     *ps0 = psq_load_elem(mem, addr, type, inv);
     *ps1 = psq_load_elem(mem, addr + step, type, inv);
@@ -178,7 +178,7 @@ inline void psq_store_elem(gcrecomp::Memory& mem, float val, uint32_t addr, uint
 }
 
 inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint32_t gqr) {
-    psq_store_elem(mem, val, addr, (gqr >> 16) & 0x7, psq_scale((gqr >> 24) & 0x3F));
+    psq_store_elem(mem, val, addr, gqr & 0x7, psq_scale((gqr >> 8) & 0x3F));
 }
 
 // A store to the write-gather pipe (0xCC008000) feeds the same FIFO address, so the second element
@@ -186,8 +186,8 @@ inline void psq_store_one(gcrecomp::Memory& mem, float val, uint32_t addr, uint3
 inline uint32_t psq_next_addr(uint32_t addr, uint32_t step) { return addr == 0xCC008000u ? addr : addr + step; }
 
 inline void psq_store_pair(gcrecomp::Memory& mem, float v0, float v1, uint32_t addr, uint32_t gqr) {
-    const uint32_t type = (gqr >> 16) & 0x7;
-    const float mul = psq_scale((gqr >> 24) & 0x3F);
+    const uint32_t type = gqr & 0x7;
+    const float mul = psq_scale((gqr >> 8) & 0x3F);
     const uint32_t step = type < PSQ_TYPE_U8 ? 4 : psq_elem_size(type);
     psq_store_elem(mem, v0, addr, type, mul);
     psq_store_elem(mem, v1, psq_next_addr(addr, step), type, mul);
@@ -203,3 +203,25 @@ inline uint64_t ppc_fctiwz(double v) {
 
 // Round to nearest, ties to even (FPSCR RN = 0, the only mode games use).
 inline uint64_t ppc_fctiw(double v) { return v != v ? 0x80000000u : ppc_fctiwz(std::nearbyint(v)); }
+
+// stfs / psq_st with a float element: the Gekko converts the double register value to single by truncating the
+// mantissa (not rounding), flushes to a signed zero what is below the single denormal range and keeps the
+// sign/class of infinities and NaNs. (Same conversion as Dolphin's ConvertToSingle.) For values that are already
+// singles, the common case, it is exact.
+inline float ppc_double_to_single(double d) {
+    uint64_t x;
+    memcpy(&x, &d, 8);
+    const uint32_t exp = static_cast<uint32_t>(x >> 52) & 0x7FF;
+    uint32_t bits;
+    if (exp > 896 || (x & 0x7FFFFFFFFFFFFFFFull) == 0) {
+        bits = static_cast<uint32_t>(((x >> 32) & 0xC0000000u) | ((x >> 29) & 0x3FFFFFFFu));
+    } else if (exp >= 874) {  // a single denormal
+        const uint64_t mant = (x & 0xFFFFFFFFFFFFFull) | 0x10000000000000ull;
+        bits = static_cast<uint32_t>((x >> 32) & 0x80000000u) | static_cast<uint32_t>(mant >> (926 - exp));
+    } else {
+        bits = static_cast<uint32_t>((x >> 32) & 0x80000000u);
+    }
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}

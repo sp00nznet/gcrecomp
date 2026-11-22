@@ -150,8 +150,8 @@ static void psq_tests() {
     Memory* mem = &g_mem;
     const uint32_t base = 0x80700000;
 
-    // qr1 = float; qr2 = signed 16-bit with scale 4 on the store side.
-    // GQR: store type bits 16-18, store scale 24-29, load type 0-2, load scale 8-13.
+    // GQR: store type bits 0-2, store scale 8-13, load type 16-18, load scale 24-29 (types: 4 u8, 5 u16, 6 s8, 7 s16).
+    // The test of the quantized load/store against a reference CPU model is tools/ppc-diff.
     g_mem.writef32(base + 8, 1.5f);
     g_mem.writef32(base + 12, -2.5f);
     c = {}; c.gqr[1] = 0; c.r[3] = base;
@@ -164,7 +164,7 @@ static void psq_tests() {
     CHECK(c.f[4] == 1.5);
 
     // psq_st with qr2 (s16, scale 4): 1.5 * 16 = 24, -2.5 * 16 = -40
-    c = {}; c.gqr[2] = (7u << 16) | (4u << 24); c.r[3] = base; set(c, 2, 1.5, -2.5f);
+    c = {}; c.gqr[2] = 7u | (4u << 8); c.r[3] = base; set(c, 2, 1.5, -2.5f);
     sem_psq_st_pair(&c, mem);
     CHECK(g_mem.read16(base + 8) == 24);
     CHECK(static_cast<int16_t>(g_mem.read16(base + 10)) == -40);
@@ -183,29 +183,31 @@ static void psq_tests() {
     sem_psq_lux_pair(&c, mem);
     CHECK(c.r[3] == base + 0x20);
 
-    c = {}; c.gqr[2] = (7u << 16) | (4u << 24); c.r[3] = base; c.r[5] = 0x40; set(c, 2, 3.0, 99.0f);
+    c = {}; c.gqr[2] = 7u | (4u << 8); c.r[3] = base; c.r[5] = 0x40; set(c, 2, 3.0, 99.0f);
     sem_psq_stx_single(&c, mem);  // W=1: one element
     CHECK(static_cast<int16_t>(g_mem.read16(base + 0x40)) == 48);
 
     // Saturation instead of wrapping, and a negative (two's complement) scale.
     g_mem.write32(base + 0x60, 0);
     gcrecomp::Memory& m = g_mem;
-    psq_store_one(m, 300.0f, base + 0x60, (4u << 16));       // u8
+    psq_store_one(m, 300.0f, base + 0x60, 4u);               // u8
     CHECK(m.read8(base + 0x60) == 255);
-    psq_store_one(m, -200.0f, base + 0x61, (5u << 16));      // s8
+    psq_store_one(m, -200.0f, base + 0x61, 6u);              // s8
     CHECK(m.read8(base + 0x61) == 0x80);
-    psq_store_one(m, 200.0f, base + 0x62, (5u << 16));
+    psq_store_one(m, 200.0f, base + 0x62, 6u);
     CHECK(m.read8(base + 0x62) == 0x7F);
-    psq_store_one(m, -5.0f, base + 0x64, (6u << 16));        // u16
+    psq_store_one(m, -5.0f, base + 0x64, 5u);                // u16
     CHECK(m.read16(base + 0x64) == 0);
-    psq_store_one(m, 1e9f, base + 0x66, (7u << 16));         // s16
+    psq_store_one(m, 1e9f, base + 0x66, 7u);                 // s16
     CHECK(m.read16(base + 0x66) == 0x7FFF);
-    psq_store_one(m, 100.0f, base + 0x68, (4u << 16) | (62u << 24));  // scale -2: 100 / 4
+    psq_store_one(m, 100.0f, base + 0x68, 4u | (62u << 8));  // scale -2: 100 / 4
     CHECK(m.read8(base + 0x68) == 25);
     m.write8(base + 0x6A, 100);
-    CHECK(psq_load_one(m, base + 0x6A, 4u | (62u << 8)) == 400.0f);  // u8 100 * 4
+    CHECK(psq_load_one(m, base + 0x6A, (4u << 16) | (62u << 24)) == 400.0f);  // u8 100 * 4
     m.write8(base + 0x6B, 0xFF);
-    CHECK(psq_load_one(m, base + 0x6B, 5u | (6u << 8)) == -1.0f / 64.0f);  // s8 -1 / 2^6
+    CHECK(psq_load_one(m, base + 0x6B, (6u << 16) | (6u << 24)) == -1.0f / 64.0f);  // s8 -1 / 2^6
+    m.write16(base + 0x6C, 0xFFFF);
+    CHECK(psq_load_one(m, base + 0x6C, 5u << 16) == 65535.0f);                       // u16
 }
 
 static void convert_tests() {

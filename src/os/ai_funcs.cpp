@@ -74,10 +74,11 @@ void trace_stats(std::chrono::steady_clock::time_point now) {
     const auto& st = g_ai.ai->stats();
     std::fprintf(stderr,
                  "[AI] blocks %llu (silent %llu) frames %llu underruns %llu stalls %llu polls %llu max poll gap %.1f ms "
-                 "block %u bytes %u Hz queued %zu\n",
+                 "block %u bytes at 0x%08X %u Hz queued %zu\n",
                  (unsigned long long)st.blocks, (unsigned long long)st.silent_blocks, (unsigned long long)st.frames,
                  (unsigned long long)st.underruns, (unsigned long long)st.stalls, (unsigned long long)st.polls, st.max_poll_gap_ms,
-                 g_ai.ai->dma_length(), audio::ai_sample_rate_hz(g_ai.ai->sample_rate_id()), g_ai.sink->queued_frames());
+                 g_ai.ai->dma_length(), g_ai.ai->dma_address(), audio::ai_sample_rate_hz(g_ai.ai->sample_rate_id()),
+                 g_ai.sink->queued_frames());
     g_ai.ai->reset_max_gap();
 }
 
