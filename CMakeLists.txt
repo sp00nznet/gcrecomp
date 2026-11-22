@@ -28,6 +28,7 @@ endif()
 option(GCRECOMP_BUILD_TOOLS "Build recompiler tools" ON)
 option(GCRECOMP_BUILD_RUNTIME "Build the game runtime libraries" ON)
 option(GCRECOMP_BUILD_EXAMPLE "Build the example launcher" ON)
+option(GCRECOMP_BUILD_TESTS "Build the unit tests" ON)
 
 # ===========================================================================
 # Runtime Library: Links with recompiled game code
@@ -43,6 +44,8 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/os/yaz0.cpp
         src/os/rarc.cpp
         src/os/ar_funcs.cpp
+        src/os/card_image.cpp
+        src/os/card_funcs.cpp
         src/os/dvd_funcs.cpp
         src/os/gx_funcs.cpp
         src/os/pad_funcs.cpp
@@ -156,5 +159,20 @@ if(GCRECOMP_BUILD_EXAMPLE AND GCRECOMP_BUILD_RUNTIME)
     target_include_directories(gcrecomp_example PRIVATE include)
     if(WIN32)
         target_link_libraries(gcrecomp_example PRIVATE d3d11 d3dcompiler dxgi)
+    endif()
+endif()
+
+# ===========================================================================
+# Unit tests (no display, no disc)
+# ===========================================================================
+if(GCRECOMP_BUILD_TESTS)
+    enable_testing()
+    add_executable(card_image_test tests/card_image_test.cpp src/os/card_image.cpp)
+    target_include_directories(card_image_test PRIVATE src/os)
+    add_test(NAME card_image COMMAND card_image_test)
+    if(GCRECOMP_BUILD_RUNTIME)
+        add_executable(card_hle_test tests/card_hle_test.cpp)
+        target_link_libraries(card_hle_test PRIVATE gcrecomp_runtime)
+        add_test(NAME card_hle COMMAND card_hle_test)
     endif()
 endif()

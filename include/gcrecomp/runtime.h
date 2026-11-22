@@ -391,6 +391,17 @@ RecompiledFunc lookup_os_func(const char* name);
 // directory on the host filesystem.
 void set_game_root(const std::string& path);
 
+// Memory card in slot A. The card is reported only while `g_card_inserted` is true and an image path
+// is set. `path` is a raw memory card image (no header; 0x80000, 0x100000 or 0x200000 bytes). A
+// missing file starts as a blank, unformatted card of `size_bytes` (the game formats it) and is
+// created on the first change. Saves are stored in the console's own format inside this image.
+extern bool g_card_inserted;
+void set_card_image(const std::string& path, size_t size_bytes = 0x200000);
+// Run the callbacks of asynchronous CARD calls that completed since the last time. The SDK runs them
+// from an interrupt after the call returned; here they run when the game polls the card or waits for
+// a retrace (VIWaitForRetrace calls this).
+void card_run_pending_callbacks(PPCContext* ctx, Memory* mem);
+
 // Mount a GameCube ISO disc image. Parses the disc header, loads the FST
 // (File System Table) into emulated memory, and enables DVD reads directly
 // from the ISO file. The FST is placed at the top of emulated RAM and
