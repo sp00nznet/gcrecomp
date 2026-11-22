@@ -169,7 +169,7 @@ needs for asset loading.
 | **Disc Image** | mount_disc_image() — FST parsing, raw disc reads | Done |
 | **Yaz0** | Nintendo Yaz0 (SZS) decompression — standard LZ format | Done |
 | **RARC** | RARC archive parser — hierarchical file extraction | Done |
-| **Threads** | OSCreateThread/Resume (minimal for single-threaded games) | Done |
+| **Threads** | Cooperative scheduler, one host thread per guest thread (threads, mutexes, conditions, message queues, alarms; see `gcrecomp/threads.h`) | Done |
 | **Interrupts** | OSDisable/Enable/RestoreInterrupts (no-ops in recomp) | Done |
 | **Mutex/MsgQueue** | Init/Lock/Unlock stubs | Done |
 | **Cache** | DCFlush/ICInvalidate (no-ops) | Done |
