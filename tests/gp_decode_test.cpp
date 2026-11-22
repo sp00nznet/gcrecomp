@@ -83,10 +83,60 @@ static void test_c8_still_works() {
     for (uint32_t i = 0; i < 32; ++i) CHECK(out[i * 4 + 2] == (i & 15) * 17);
 }
 
+static void test_mip_levels() {
+    // TX_SETMODE0 min filter field is bits 5-7; TX_SETMODE1 max LOD is bits 8-15 (4.4 fixed point).
+    auto mode0 = [](uint32_t filter) { return filter << 5; };
+    auto mode1 = [](uint32_t max_lod_x16) { return max_lod_x16 << 8; };
+    // Non-mipmap filters never load more than one level, whatever the max LOD says.
+    CHECK(mip_level_count(64, 64, mode0(0), mode1(0x50)) == 1);
+    CHECK(mip_level_count(64, 64, mode0(4), mode1(0x50)) == 1);
+    // GX_LIN_MIP_LIN with maxLOD = 5 on a 64x64 texture: levels 0..5.
+    CHECK(mip_level_count(64, 64, mode0(6), mode1(0x50)) == 6);
+    // A fractional max LOD rounds up (LOD 2.5 samples between levels 2 and 3).
+    CHECK(mip_level_count(64, 64, mode0(6), mode1(0x28)) == 4);
+    // Capped by the size: 64x16 has 7 levels (64..1), a max LOD of 15.9 does not ask for more.
+    CHECK(mip_level_count(64, 16, mode0(5), mode1(0xFF)) == 7);
+    CHECK(mip_level_count(1, 1, mode0(6), mode1(0x50)) == 1);
+    // Mipmap filters degrade to their base filter with a single level.
+    CHECK(effective_min_filter(mode0(6), 1) == MinFilter::Linear);
+    CHECK(effective_min_filter(mode0(2), 1) == MinFilter::Nearest);
+    CHECK(effective_min_filter(mode0(6), 3) == MinFilter::LinearMipLinear);
+    CHECK(effective_min_filter(mode0(1), 3) == MinFilter::NearestMipNearest);
+    CHECK(effective_min_filter(mode0(2), 3) == MinFilter::NearestMipLinear);
+    CHECK(effective_min_filter(mode0(5), 3) == MinFilter::LinearMipNearest);
+    CHECK(effective_min_filter(mode0(0), 3) == MinFilter::Nearest);
+}
+
+static void test_mip_layout() {
+    // 32x16 CMPR (8x8 tiles of 32 bytes): 4x2 tiles, then 16x8 (2x1), 8x4 (1x1 after padding), 4x2, 2x1, 1x1.
+    CHECK(texture_bytes(32, 16, 14) == 8 * 32);
+    CHECK(mip_level_offset(32, 16, 14, 0) == 0);
+    CHECK(mip_level_offset(32, 16, 14, 1) == 8 * 32);
+    CHECK(mip_level_offset(32, 16, 14, 2) == 8 * 32 + 2 * 32);
+    CHECK(mip_level_offset(32, 16, 14, 3) == 8 * 32 + 2 * 32 + 32);
+    CHECK(mip_chain_bytes(32, 16, 14, 6) == 8 * 32 + 2 * 32 + 4 * 32);
+    // RGBA8 uses 64-byte tiles; levels below the tile size still take one tile each.
+    CHECK(mip_chain_bytes(8, 8, 6, 4) == (4 + 1 + 1 + 1) * 64);
+    // The dimension never drops below 1 for non-square textures.
+    CHECK(mip_dim(16, 4) == 1 && mip_dim(4, 4) == 1 && mip_dim(4, 1) == 2);
+}
+
+static void test_lod_fields() {
+    CHECK(lod_bias_of(0x10u << 9) == 0.5f);                 // +16/32
+    CHECK(lod_bias_of(0xF0u << 9) == -0.5f);                // two's complement -16/32
+    CHECK(lod_bias_of(0x80u << 9) == -4.0f);
+    CHECK(lod_bias_of(0x7Fu << 9) == 127.0f / 32.0f);
+    CHECK(min_lod_of(0x18) == 1.5f);
+    CHECK(max_lod_of(0x2800) == 2.5f);
+}
+
 int main() {
     test_c14x2();
     test_c14x2_out_of_range();
     test_c8_still_works();
+    test_mip_levels();
+    test_mip_layout();
+    test_lod_fields();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

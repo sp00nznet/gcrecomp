@@ -26,4 +26,43 @@ void tlut_entry_to_rgba(uint32_t entry, uint32_t pal_fmt, uint8_t out[4]);
 std::vector<uint8_t> decode_indexed(const uint8_t* tlut, size_t tlut_size, const uint8_t* src, uint32_t w,
                                     uint32_t h, uint32_t fmt, uint32_t settlut);
 
+// ---- Mipmaps ----------------------------------------------------------------------------------
+//
+// TX_SETMODE0 (BP 0x80+map, 0xA0+map): bits 0-1 wrap S, 2-3 wrap T, 4 magnification filter (1 linear),
+// 5-7 minification filter, 9-16 signed LOD bias in 1/32 units. TX_SETMODE1 (BP 0x84+map, 0xA4+map):
+// bits 0-7 minimum LOD, bits 8-15 maximum LOD, both unsigned 4.4 fixed point.
+//
+// Approximations: the game does not say how many levels a texture has; the count is derived from the
+// maximum LOD (what GXInitTexObj writes for a mipmapped texture). Levels are read from memory one
+// after the other, each padded to whole tiles, as the SDK lays them out. The LOD itself is computed
+// by OpenGL, not by the GX formula (no diagonal-LOD or edge-LOD modes, no anisotropy).
+
+enum class MinFilter : uint32_t { Nearest, NearestMipNearest, NearestMipLinear, Linear, LinearMipNearest, LinearMipLinear };
+
+// Minification filter of TX_SETMODE0. Reserved codes 3 and 7 fall back to the base filter.
+MinFilter min_filter_of(uint32_t mode0);
+
+// Number of levels to load: 1 unless the filter uses mipmaps and the maximum LOD asks for more, never
+// more than the texture can have (down to 1x1).
+uint32_t mip_level_count(uint32_t w, uint32_t h, uint32_t mode0, uint32_t mode1);
+
+// The filter to give OpenGL: mipmap filters degrade to their base filter when only one level exists.
+MinFilter effective_min_filter(uint32_t mode0, uint32_t levels);
+
+// Size of a level (each dimension halves, rounding down, never below 1).
+inline uint32_t mip_dim(uint32_t d, uint32_t level) { return (d >> level) ? (d >> level) : 1; }
+
+// Byte offset of `level` from the start of the texture in memory.
+size_t mip_level_offset(uint32_t w, uint32_t h, uint32_t fmt, uint32_t level);
+
+// Bytes occupied by `levels` levels.
+size_t mip_chain_bytes(uint32_t w, uint32_t h, uint32_t fmt, uint32_t levels);
+
+// LOD bias in levels (TX_SETMODE0 bits 9-16, 1/32 units).
+float lod_bias_of(uint32_t mode0);
+
+// Minimum and maximum LOD in levels (TX_SETMODE1).
+inline float min_lod_of(uint32_t mode1) { return float(mode1 & 0xFF) / 16.0f; }
+inline float max_lod_of(uint32_t mode1) { return float((mode1 >> 8) & 0xFF) / 16.0f; }
+
 }  // namespace gcrecomp::gp

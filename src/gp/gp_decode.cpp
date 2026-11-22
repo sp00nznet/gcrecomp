@@ -95,4 +95,45 @@ std::vector<uint8_t> decode_indexed(const uint8_t* tlut, size_t tlut_size, const
     return out;
 }
 
+MinFilter min_filter_of(uint32_t mode0) {
+    switch ((mode0 >> 5) & 7) {
+        case 1: return MinFilter::NearestMipNearest;
+        case 2: return MinFilter::NearestMipLinear;
+        case 4: case 7: return MinFilter::Linear;
+        case 5: return MinFilter::LinearMipNearest;
+        case 6: return MinFilter::LinearMipLinear;
+        default: return MinFilter::Nearest;
+    }
+}
+
+uint32_t mip_level_count(uint32_t w, uint32_t h, uint32_t mode0, uint32_t mode1) {
+    const MinFilter f = min_filter_of(mode0);
+    if (f == MinFilter::Nearest || f == MinFilter::Linear) return 1;
+    uint32_t max_levels = 1;
+    for (uint32_t d = w > h ? w : h; d > 1; d >>= 1) ++max_levels;
+    const uint32_t max_lod = (mode1 >> 8) & 0xFF;               // 4.4 fixed point
+    const uint32_t wanted = (max_lod + 15) / 16 + 1;           // round the fraction up
+    return wanted < max_levels ? wanted : max_levels;
+}
+
+MinFilter effective_min_filter(uint32_t mode0, uint32_t levels) {
+    const MinFilter f = min_filter_of(mode0);
+    if (levels > 1) return f;
+    return (f == MinFilter::Nearest || f == MinFilter::NearestMipNearest || f == MinFilter::NearestMipLinear)
+               ? MinFilter::Nearest
+               : MinFilter::Linear;
+}
+
+size_t mip_level_offset(uint32_t w, uint32_t h, uint32_t fmt, uint32_t level) {
+    size_t off = 0;
+    for (uint32_t l = 0; l < level; ++l) off += texture_bytes(mip_dim(w, l), mip_dim(h, l), fmt);
+    return off;
+}
+
+size_t mip_chain_bytes(uint32_t w, uint32_t h, uint32_t fmt, uint32_t levels) {
+    return mip_level_offset(w, h, fmt, levels);
+}
+
+float lod_bias_of(uint32_t mode0) { return float(int8_t((mode0 >> 9) & 0xFF)) / 32.0f; }
+
 }  // namespace gcrecomp::gp

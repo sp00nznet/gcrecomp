@@ -232,13 +232,15 @@ GLuint texture_for_map(const State& s, int map) {
     const uint32_t img0 = s.bp[map < 4 ? 0x88 + map : 0xA8 + (map - 4)];
     const uint32_t img3 = s.bp[map < 4 ? 0x94 + map : 0xB4 + (map - 4)];
     const uint32_t mode0 = s.bp[map < 4 ? 0x80 + map : 0xA0 + (map - 4)];
+    const uint32_t mode1 = s.bp[map < 4 ? 0x84 + map : 0xA4 + (map - 4)];
     const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 0xF;
     const uint32_t addr = (img3 & 0xFFFFFF) << 5;
     const bool indexed = fmt == kTexC4 || fmt == kTexC8 || fmt == kTexC14X2;
     const uint32_t settlut = indexed ? s.bp[map < 4 ? 0x98 + map : 0xB8 + (map - 4)] : 0;
-    const size_t bytes = texture_bytes(w, h, fmt);
+    const uint32_t levels = mip_level_count(w, h, mode0, mode1);
+    const size_t bytes = mip_chain_bytes(w, h, fmt, levels);
     const uint8_t* src = g_mem.translate(addr);
-    const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt;
+    const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt ^ (uint64_t(levels) << 56);
     uint64_t hash = hash_bytes(src, bytes);
     if (indexed) {
         // Hash the part of the TLUT the format can reach: 16, 256 or 16384 entries of 2 bytes.
@@ -249,8 +251,13 @@ GLuint texture_for_map(const State& s, int map) {
     }
     CachedTexture& t = g_textures[key];
     if (t.id == 0 || t.hash != hash) {
-        std::vector<uint8_t> rgba = indexed ? decode_indexed(s.tlut, sizeof(s.tlut), src, w, h, fmt, settlut)
-                                            : gx::decode_texture(src, w, h, gx::GXTexFmt(fmt));
+        auto decode_level = [&](uint32_t level) {
+            const uint32_t lw = mip_dim(w, level), lh = mip_dim(h, level);
+            const uint8_t* lsrc = src + mip_level_offset(w, h, fmt, level);
+            return indexed ? decode_indexed(s.tlut, sizeof(s.tlut), lsrc, lw, lh, fmt, settlut)
+                           : gx::decode_texture(lsrc, lw, lh, gx::GXTexFmt(fmt));
+        };
+        const std::vector<uint8_t> rgba = decode_level(0);
         if (const char* dir = std::getenv("GP_DUMP_TEX")) {
             static int dumped = 0;
             if (dumped < 24) {
@@ -273,6 +280,13 @@ GLuint texture_for_map(const State& s, int map) {
         glBindTexture(GL_TEXTURE_2D, t.id);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        for (uint32_t level = 1; level < levels; ++level) {
+            const std::vector<uint8_t> mip = decode_level(level);
+            glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, mip_dim(w, level), mip_dim(h, level), 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, mip.data());
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, GLint(levels - 1));
         t.hash = hash;
     }
     glBindTexture(GL_TEXTURE_2D, t.id);
@@ -280,7 +294,12 @@ GLuint texture_for_map(const State& s, int map) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap[(mode0 & 3) % 3]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap[((mode0 >> 2) & 3) % 3]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (mode0 & 0x10) ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ((mode0 >> 5) & 7) >= 4 ? GL_LINEAR : GL_NEAREST);
+    static const GLint min_filters[6] = {GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
+                                         GL_LINEAR,  GL_LINEAR_MIPMAP_NEAREST,  GL_LINEAR_MIPMAP_LINEAR};
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filters[uint32_t(effective_min_filter(mode0, levels))]);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, lod_bias_of(mode0));
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, min_lod_of(mode1));
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, max_lod_of(mode1));
     return t.id;
 }
 
