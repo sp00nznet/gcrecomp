@@ -99,6 +99,7 @@ if(GCRECOMP_BUILD_RUNTIME)
         find_package(OpenGL QUIET)
         add_library(gcrecomp_gp STATIC
             src/gp/gp.cpp
+            src/gp/lighting.cpp
             src/gp/gl_renderer.cpp
         )
         target_include_directories(gcrecomp_gp PUBLIC include)
@@ -157,4 +158,15 @@ if(GCRECOMP_BUILD_EXAMPLE AND GCRECOMP_BUILD_RUNTIME)
     if(WIN32)
         target_link_libraries(gcrecomp_example PRIVATE d3d11 d3dcompiler dxgi)
     endif()
+endif()
+
+# ===========================================================================
+# Unit tests (no display, no disc): cmake -DGCRECOMP_BUILD_TESTS=ON, then ctest
+# ===========================================================================
+option(GCRECOMP_BUILD_TESTS "Build the unit tests" OFF)
+if(GCRECOMP_BUILD_TESTS)
+    enable_testing()
+    add_executable(test_gp_lighting tests/test_gp_lighting.cpp src/gp/lighting.cpp)
+    target_include_directories(test_gp_lighting PRIVATE src/gp)
+    add_test(NAME gp_lighting COMMAND test_gp_lighting)
 endif()
