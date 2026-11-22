@@ -494,26 +494,61 @@ void print_feature_use() {
     if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
 }
 
+// Reads the window back (the blit that precedes leaves the EFB bound for reading: read the window).
+std::vector<uint8_t> read_window_rgb() {
+    std::vector<uint8_t> px(size_t(g_window_w) * g_window_h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, g_window_w, g_window_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    // GL rows run bottom to top; the file and the signature want the top row first.
+    for (int a = 0, b = g_window_h - 1; a < b; ++a, --b)
+        std::swap_ranges(px.begin() + size_t(a) * g_window_w * 3, px.begin() + size_t(a + 1) * g_window_w * 3, px.begin() + size_t(b) * g_window_w * 3);
+    return px;
+}
+
+void write_ppm(const char* path, const std::vector<uint8_t>& px) {
+    if (FILE* f = std::fopen(path, "wb")) {
+        std::fprintf(f, "P6\n%d %d\n255\n", g_window_w, g_window_h);
+        std::fwrite(px.data(), 1, px.size(), f);
+        std::fclose(f);
+    }
+}
+
+// Called after the frame is drawn and before it is swapped: periodic screenshots, the shots a script
+// asked for, and the picture signature a script waits on.
 void write_screenshot() {
     static uint64_t presented = 0;
     static const int every = [] {
         const char* v = std::getenv("GP_SHOT_EVERY");
         return v ? std::max(1, std::atoi(v)) : 1;
     }();
-    if (presented++ % every != 0) return;
-    if (!g_shot_dir || (g_shot_max && g_shot_count >= g_shot_max)) return;
-    std::vector<uint8_t> px(size_t(g_window_w) * g_window_h * 3);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    // The blit that precedes this call leaves the EFB bound for reading: read the window instead.
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glReadBuffer(GL_BACK);
-    glReadPixels(0, 0, g_window_w, g_window_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-    char path[512];
-    std::snprintf(path, sizeof(path), "%s/frame_%04d.ppm", g_shot_dir, g_shot_count++);
-    if (FILE* f = std::fopen(path, "wb")) {
-        std::fprintf(f, "P6\n%d %d\n255\n", g_window_w, g_window_h);
-        for (int y = g_window_h - 1; y >= 0; --y) std::fwrite(&px[size_t(y) * g_window_w * 3], 1, size_t(g_window_w) * 3, f);
-        std::fclose(f);
+    const std::vector<std::string> requested = input::take_shot_requests();
+    const bool periodic = presented++ % every == 0 && g_shot_dir && !(g_shot_max && g_shot_count >= g_shot_max);
+    const bool sig = input::wants_signature();
+    if (!periodic && requested.empty() && !sig) {
+        input::notify_frame(nullptr);
+        return;
+    }
+    const std::vector<uint8_t> px = read_window_rgb();
+    if (sig) {
+        const input::FrameSignature s = input::frame_signature(px.data(), g_window_w, g_window_h);
+        input::notify_frame(&s);
+    } else {
+        input::notify_frame(nullptr);
+    }
+    char path[1024];
+    for (const std::string& name : requested) {
+        if (!g_shot_dir) {
+            std::fprintf(stderr, "[script] shot %s: no screenshot directory (TOS_SCREENSHOT_DIR)\n", name.c_str());
+            continue;
+        }
+        std::snprintf(path, sizeof(path), "%s/%s.ppm", g_shot_dir, name.c_str());
+        write_ppm(path, px);
+    }
+    if (periodic) {
+        std::snprintf(path, sizeof(path), "%s/frame_%04d.ppm", g_shot_dir, g_shot_count++);
+        write_ppm(path, px);
     }
 }
 

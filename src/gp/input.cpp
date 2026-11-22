@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "input.h"
 
+#include "gcrecomp/gp/gp.h"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -282,42 +285,6 @@ void PortAssigner::release(uint32_t device) {
         if (o == device) o = 0;
 }
 
-// ---- Scripted input -----------------------------------------------------------------------------
-
-std::vector<ScriptStep> parse_script(const char* text) {
-    std::vector<ScriptStep> steps;
-    for (const char* c = text; c && *c;) {
-        const int frame = std::atoi(c);
-        const char* colon = std::strchr(c, ':');
-        if (!colon) break;
-        uint16_t mask = 0;
-        switch (colon[1]) {
-            case 'A': mask = kA; break;
-            case 'B': mask = kB; break;
-            case 'X': mask = kX; break;
-            case 'Y': mask = kY; break;
-            case 'S': mask = kStart; break;
-            case 'U': mask = kUp; break;
-            case 'D': mask = kDown; break;
-            case 'L': mask = kLeft; break;
-            case 'R': mask = kRight; break;
-            default: break;
-        }
-        steps.push_back({frame, mask});
-        const char* comma = std::strchr(colon, ',');
-        if (!comma) break;
-        c = comma + 1;
-    }
-    return steps;
-}
-
-uint16_t script_buttons(const std::vector<ScriptStep>& steps, int frame) {
-    uint16_t m = 0;
-    for (const ScriptStep& s : steps)
-        if (frame >= s.frame && frame < s.frame + 5) m |= s.mask;
-    return m;
-}
-
 // ---- SDL layer ----------------------------------------------------------------------------------
 
 namespace {
@@ -332,7 +299,10 @@ struct Device {
 KeyMap g_keymap = default_keymap();
 std::vector<Device> g_gamepads;
 PortAssigner g_ports;
-std::vector<ScriptStep> g_script;
+Script g_script;
+FrameSignature g_signature;
+uint64_t g_presented = 0, g_signature_at = 0;
+std::chrono::steady_clock::time_point g_start = std::chrono::steady_clock::now();
 int g_frame = 0;
 bool g_rumbling[4] = {};
 
@@ -376,6 +346,44 @@ void stop_rumble(int port) {
         if (d.id == g_ports.owner(port)) SDL_RumbleGamepad(d.pad, 0, 0, 0);
 }
 
+
+// TOS_SCRIPT is the script text, or "@path" to read it from a file.
+void load_script() {
+    const char* env = std::getenv("TOS_SCRIPT");
+    g_start = std::chrono::steady_clock::now();
+    if (!env || !*env) return;
+    std::string text = env;
+    if (env[0] == '@') {
+        std::ifstream f(env + 1);
+        if (!f) {
+            std::fprintf(stderr, "[script] cannot read %s\n", env + 1);
+            return;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+    }
+    std::string error;
+    if (!g_script.parse(text.c_str(), error)) std::fprintf(stderr, "[script] %s\n", error.c_str());
+    else std::fprintf(stderr, "[script] %zu command(s) loaded\n", g_script.commands().size());
+}
+
+uint16_t run_script() {
+    if (g_script.empty()) return 0;
+    Observation o;
+    o.frame = g_frame;
+    o.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
+    o.presented = g_presented;
+    o.sig = g_signature.empty() ? nullptr : &g_signature;
+    o.sig_at = g_signature_at;
+    take_opened_disc_files(o.files);
+    for (const std::string& f : o.files) std::fprintf(stderr, "[script] frame %d: game opened %s\n", g_frame, f.c_str());
+    const uint16_t buttons = g_script.step(o);
+    for (int n : g_script.take_traces()) request_trace_frame(uint64_t(n));
+    for (const std::string& line : g_script.take_log()) std::fprintf(stderr, "[script] %s\n", line.c_str());
+    return buttons;
+}
+
 }  // namespace
 
 void init(const char* toml_path) {
@@ -390,7 +398,7 @@ void init(const char* toml_path) {
             else std::fprintf(stderr, "[input] %s: %s; using the default keyboard map\n", toml_path, error.c_str());
         }
     }
-    g_script = parse_script(std::getenv("TOS_SCRIPT"));
+    load_script();
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "[input] gamepads unavailable: %s\n", SDL_GetError());
         return;
@@ -438,7 +446,7 @@ void update() {
     for (const Device& d : g_gamepads) place(d.id, gamepad_to_pad(read_gamepad(d.pad)));
 
     ++g_frame;
-    next[0].buttons |= script_buttons(g_script, g_frame);
+    next[0].buttons |= run_script();
 
     for (int p = 0; p < 4; ++p) {
         const bool owned = g_ports.owner(p) != 0;
@@ -459,5 +467,17 @@ void update() {
         }
     }
 }
+
+bool wants_signature() { return g_script.needs_signature(); }
+
+void notify_frame(const FrameSignature* sig) {
+    ++g_presented;
+    if (sig) {
+        g_signature = *sig;
+        g_signature_at = g_presented;
+    }
+}
+
+std::vector<std::string> take_shot_requests() { return g_script.take_shots(); }
 
 }  // namespace gcrecomp::gp::input

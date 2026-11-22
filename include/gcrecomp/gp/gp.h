@@ -37,6 +37,9 @@ bool pump_events();
 
 // Number of frames presented so far (copies to the external frame buffer).
 uint64_t frames_presented();
+// Traces the draws of the frame `frames_presented() + n` as GP_TRACE_FRAME does (n >= 1; 1 is the frame in
+// progress). Used by the script command `trace-frame` to look at a frame reached by events.
+void request_trace_frame(uint64_t n);
 
 // Counters for diagnosing what the game submits.
 struct Stats {

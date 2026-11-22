@@ -163,6 +163,7 @@ if(GCRECOMP_BUILD_RUNTIME)
             src/gp/gl_renderer.cpp
             src/gp/gl_loader.cpp
             src/gp/input.cpp
+            src/gp/input_script.cpp
             src/gp/efb_copy.cpp
             src/gp/gp_decode.cpp
         )
@@ -175,6 +176,10 @@ if(GCRECOMP_BUILD_RUNTIME)
             target_include_directories(gcrecomp_input_tests PRIVATE include src/gp)
             target_link_libraries(gcrecomp_input_tests PRIVATE gcrecomp_gp gcrecomp_runtime)
             add_test(NAME input COMMAND gcrecomp_input_tests)
+            add_executable(input_script_test tests/input_script_test.cpp)
+            target_include_directories(input_script_test PRIVATE include src/gp)
+            target_link_libraries(input_script_test PRIVATE gcrecomp_gp gcrecomp_runtime)
+            add_test(NAME input_script COMMAND input_script_test)
             add_executable(gp_decode_test tests/gp_decode_test.cpp)
             target_include_directories(gp_decode_test PRIVATE src/gp)
             target_link_libraries(gp_decode_test PRIVATE gcrecomp_gp)

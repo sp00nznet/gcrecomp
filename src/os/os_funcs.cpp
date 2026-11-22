@@ -615,6 +615,14 @@ struct DVDFileEntry {
 
 static std::string g_game_root;  // Root directory of extracted game files
 static std::unordered_map<uint32_t, FILE*> g_open_dvd_files;  // fileinfo addr -> FILE*
+static std::mutex g_opened_mu;
+static std::vector<std::string> g_opened_files;  // paths opened since take_opened_disc_files
+
+void take_opened_disc_files(std::vector<std::string>& out) {
+    std::lock_guard<std::mutex> lk(g_opened_mu);
+    for (std::string& p : g_opened_files) out.push_back(std::move(p));
+    g_opened_files.clear();
+}
 
 // The disc's file system is case-insensitive; the host's usually is not (the game asks for "s/se.snd"
 // where the extracted disc has "S/se.snd"). Returns `path` below `root` with each component matched
@@ -680,6 +688,10 @@ static bool open_disc_file(const char* path, uint32_t info_addr, Memory* mem) {
     g_open_dvd_files[info_addr] = fp;
 
     printf("[DVD] Open: %s (%u bytes)\n", path, file_size);
+    {
+        std::lock_guard<std::mutex> lk(g_opened_mu);
+        g_opened_files.push_back(path);
+    }
     return true;
 }
 

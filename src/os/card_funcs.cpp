@@ -9,6 +9,7 @@
 // their callback shortly after, from card_run_pending_callbacks (the SDK runs it from an interrupt,
 // after the call returned; running it inside the call would break games that set up their wait state
 // after calling). Signatures follow the Dolphin SDK (libogc's card.h for names).
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -53,7 +54,31 @@ uint32_t card_now() {
     return t < 0 ? 0 : (uint32_t)t;
 }
 
-bool present(int32_t chan) { return chan == 0 && g_card_inserted && !g_path.empty(); }
+// GCRECOMP_CARD_IMAGE=path[:size] inserts a card image in slot A for a host program that did not call
+// set_card_image() itself (a missing file starts as a blank card that the game formats). Read once.
+void card_from_env() {
+    static const bool once = [] {
+        const char* env = std::getenv("GCRECOMP_CARD_IMAGE");
+        if (!env || !*env || g_card_inserted || !g_path.empty()) return true;
+        std::string path = env;
+        size_t size = g_size;
+        const size_t colon = path.rfind(':');
+        if (colon != std::string::npos && colon + 1 < path.size() && std::isdigit((unsigned char)path[colon + 1])) {
+            size = size_t(std::strtoull(path.c_str() + colon + 1, nullptr, 0));
+            path.resize(colon);
+        }
+        g_path = path;
+        g_size = size;
+        g_card_inserted = true;
+        return true;
+    }();
+    (void)once;
+}
+
+bool present(int32_t chan) {
+    card_from_env();
+    return chan == 0 && g_card_inserted && !g_path.empty();
+}
 
 // Open (or create in memory) the image behind slot A. Call with g_mu held.
 bool ensure_image(Slot& s) {

@@ -200,20 +200,30 @@ static void test_port_assignment() {
     CHECK(ports.port_for(50, true) == 1);
 }
 
+// The first script format ("FRAME:BUTTON,...", five frames each) still works; the rest of the language
+// is in input_script_test.cpp.
 static void test_script() {
-    const auto steps = parse_script("10:A,20:S,30:U,40:Q,50:R");
-    CHECK(steps.size() == 5);
-    CHECK(script_buttons(steps, 9) == 0);
-    CHECK(script_buttons(steps, 10) == kA);
-    CHECK(script_buttons(steps, 14) == kA);
-    CHECK(script_buttons(steps, 15) == 0);
-    CHECK(script_buttons(steps, 20) == kStart);
-    CHECK(script_buttons(steps, 30) == kUp);
-    CHECK(script_buttons(steps, 40) == 0);  // unknown button holds nothing
-    CHECK(script_buttons(steps, 50) == kRight);
-    CHECK(parse_script(nullptr).empty() && parse_script("").empty());
-    const auto overlap = parse_script("10:A,12:B");
-    CHECK(script_buttons(overlap, 13) == (kA | kB));
+    Script script;
+    std::string error;
+    CHECK(script.parse("10:A,20:S,30:U,40:Q,50:R,52:B", error));
+    auto at = [&](int frame) {
+        Observation o;
+        o.frame = frame;
+        return script.step(o);
+    };
+    uint16_t held[60] = {};
+    for (int f = 1; f < 60; ++f) held[f] = at(f);
+    CHECK(held[9] == 0);
+    CHECK(held[10] == kA && held[14] == kA);
+    CHECK(held[15] == 0);
+    CHECK(held[20] == kStart);
+    CHECK(held[30] == kUp);
+    CHECK(held[40] == 0);  // unknown button holds nothing
+    CHECK(held[50] == kRight);
+    CHECK(held[53] == (kRight | kB));  // overlapping presses combine
+    Script none;
+    CHECK(none.parse(nullptr, error) && none.empty());
+    CHECK(none.parse("", error) && none.empty());
 }
 
 static void test_pad_replacements() {

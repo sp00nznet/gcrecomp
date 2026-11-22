@@ -23,6 +23,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace gcrecomp {
 
@@ -417,6 +418,11 @@ RecompiledFunc lookup_os_func(const char* name);
 // (DVDOpen, DVDReadPrio, etc.) will resolve game paths relative to this
 // directory on the host filesystem.
 void set_game_root(const std::string& path);
+
+// Moves the paths of the disc files the game opened (DVDOpen, DVDFastOpen; as the game wrote them)
+// since the last call into `out`, oldest first. Lets a host program (the scripted input) wait for the
+// game to open a file.
+void take_opened_disc_files(std::vector<std::string>& out);
 
 // Memory card in slot A. The card is reported only while `g_card_inserted` is true and an image path
 // is set. `path` is a raw memory card image (no header; 0x80000, 0x100000 or 0x200000 bytes). A

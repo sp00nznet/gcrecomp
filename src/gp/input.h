@@ -2,7 +2,7 @@
 //
 // Host input -> GameCube controller state.
 //
-// The pure parts (scaling, keyboard map, TOML parsing, port assignment, TOS_SCRIPT) take plain data
+// The pure parts (scaling, keyboard map, TOML parsing, port assignment; the scripted input is in input_script.h) take plain data
 // so they can be tested without a window or a device; the SDL part (`init`, `handle_event`,
 // `update`) reads the keyboard and gamepads and writes gcrecomp::g_pad[0..3].
 #pragma once
@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "gcrecomp/runtime.h"
+#include "input_script.h"
 
 union SDL_Event;
 
@@ -99,17 +100,6 @@ private:
     uint32_t owner_[4] = {};
 };
 
-// ---- Scripted input (TOS_SCRIPT) --------------------------------------------------------------
-
-// "frame:button,frame:button": holds the button for five frames from `frame` (1-based). Buttons:
-// A B X Y S(tart) U D L R (D-pad); an unknown letter holds nothing.
-struct ScriptStep {
-    int frame;
-    uint16_t mask;
-};
-std::vector<ScriptStep> parse_script(const char* text);
-uint16_t script_buttons(const std::vector<ScriptStep>& steps, int frame);
-
 // ---- SDL layer ------------------------------------------------------------------------------
 
 // Opens gamepad support and loads the keyboard map from `toml_path` (may be null or missing: the
@@ -118,7 +108,15 @@ void init(const char* toml_path);
 void shutdown();
 // Gamepad hot plug.
 void handle_event(const SDL_Event& e);
-// Once per frame: reads devices, runs TOS_SCRIPT, writes g_pad and drives rumble.
+// Once per frame: reads devices, runs the script (TOS_SCRIPT, see docs/INPUT_SCRIPT.md), writes
+// g_pad and drives rumble.
 void update();
+
+// Script support for the renderer. notify_frame() is called for every presented frame, with the
+// frame's signature when wants_signature() said it is needed (null otherwise). take_shot_requests()
+// returns the screenshot names the script asked for since the last call.
+bool wants_signature();
+void notify_frame(const FrameSignature* sig);
+std::vector<std::string> take_shot_requests();
 
 }  // namespace gcrecomp::gp::input

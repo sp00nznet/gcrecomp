@@ -1,0 +1,14 @@
+# Tales of Symphonia (GQSF) from a blank card to the opening field scene. Inputs only, no game data.
+# Blank card: 'Formater' (3rd entry) -> 'Oui' -> dismiss 'Formatage termine'.
+wait 200; press D; wait 20; press D; wait 20; press A
+wait 60; press U; wait 20; press A
+wait 150; press A
+wait-file mov/op.h4m timeout=60
+press S                                           # START skips the opening movie
+wait-file title.tpl timeout=30
+wait 500
+press-until-file map/isa_i06 A every=100 hold=10  # Nouvelle partie
+press-until-file mov/s01 D A every=40             # 'Modifier les parametres?' -> 'Pas maintenant', if shown
+wait-file map/isa_t02 timeout=120
+wait 400
+shot field

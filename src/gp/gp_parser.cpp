@@ -8,6 +8,7 @@
 #include "gcrecomp/gp/gp.h"
 
 #include <cmath>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -27,9 +28,18 @@ float State::xf_float(uint32_t addr) const {
 Stats g_stats;
 State g_state;
 uint64_t g_frames = 0;
+std::atomic<long> g_trace_request{-1};  // request_trace_frame(): the frame to trace, overrides GP_TRACE_FRAME
 bool g_graphics = false;
 
 namespace {
+
+// True while the frame being drawn is the one GP_TRACE_FRAME or request_trace_frame() names.
+bool tracing_frame() {
+    static const long env_trace_frame = std::getenv("GP_TRACE_FRAME") ? std::atol(std::getenv("GP_TRACE_FRAME")) : -1;
+    const long requested = g_trace_request.load(std::memory_order_relaxed);
+    const long trace_frame = requested >= 0 ? requested : env_trace_frame;
+    return trace_frame >= 0 && uint64_t(trace_frame) == g_frames;
+}
 
 uint32_t be32(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
@@ -421,6 +431,10 @@ private:
         r.y = int((tl >> 10) & 0x3FF);
         r.w = int(br & 0x3FF) + 1;
         r.h = int((br >> 10) & 0x3FF) + 1;
+        if (tracing_frame())
+            std::fprintf(stderr, "[COPY] to_xfb=%d clear=%d src=(%d,%d) %dx%d cmd=%06X dest=0x%06X stride=%u pe_control=%06X (pixel format %u, z format %u) clear AR=%06X GB=%06X z=%06X\n",
+                         r.to_xfb, r.clear, r.x, r.y, r.w, r.h, value, (s.bp[0x4B] & 0xFFFFFF) << 5, s.bp[0x4D] & 0x3FF, s.bp[0x43], s.bp[0x43] & 7,
+                         (s.bp[0x43] >> 3) & 7, s.bp[0x4F], s.bp[0x50], s.bp[0x51]);
         if (g_graphics) renderer::copy_efb(r, g_state);
         if (r.to_xfb) ++g_frames;
     }
@@ -464,8 +478,7 @@ private:
         unpack_rgba8(s.xf[0x100D], mat_color[1]);
 
         const uint32_t num_texgens = s.bp[0x00] & 0xF;
-        static const long trace_frame = std::getenv("GP_TRACE_FRAME") ? std::atol(std::getenv("GP_TRACE_FRAME")) : -1;
-        const bool trace = trace_frame >= 0 && uint64_t(trace_frame) == g_frames;
+        const bool trace = tracing_frame();
         static int trace_n = 0;
         if (trace) {
             ++trace_n;
@@ -578,6 +591,23 @@ private:
                              s.xf[0x100A], s.xf[0x100C], s.xf[0x603 + 0], s.xf[0x603 + 16], s.xf_float(0x60A), s.xf_float(0x60B), s.xf_float(0x60C),
                              s.xf_float(0x60D), s.xf_float(0x60E), s.xf_float(0x60F), color[0][0], color[0][1], color[0][2], color[0][3]);
             }
+            if (trace) {
+                // GP_TRACE_VERTS=first-last: every vertex of those draws of the traced frame (position, vertex
+                // colour 0, lit channel 0, first texture coordinates).
+                static int verts_first = -1, verts_last = -1;
+                static bool verts_ortho = false;
+                static const bool verts_parsed = [] {
+                    if (const char* e = std::getenv("GP_TRACE_VERTS")) {
+                        if (!std::strcmp(e, "ortho")) verts_ortho = true;
+                        else if (std::sscanf(e, "%d-%d", &verts_first, &verts_last) == 1) verts_last = verts_first;
+                    }
+                    return true;
+                }();
+                (void)verts_parsed;
+                if ((trace_n >= verts_first && trace_n <= verts_last) || (verts_ortho && ortho))
+                    std::fprintf(stderr, "[VERT] #%d v%u pos=(%g %g %g) col0=(%g %g %g %g) lit0=(%g %g %g %g) st0=(%g %g)\n", trace_n, v, pos[0], pos[1], pos[2],
+                                 color[0][0], color[0][1], color[0][2], color[0][3], lit[0][0], lit[0][1], lit[0][2], lit[0][3], st[0][0], st[0][1]);
+            }
             if (trace && trace_n <= 3 && v < 4) {
                 std::fprintf(stderr, "[DRAW]   v%u mtx=%u pos=(%g %g %g) view=(%g %g %g) clip=(%g %g %g %g) rows:", v, pos_mtx, pos[0], pos[1], pos[2], view[0], view[1], view[2], cx, cy, cz, cw);
                 for (int r = 0; r < 12; ++r) std::fprintf(stderr, " %g", s.xf_float(m + r));
@@ -684,6 +714,7 @@ void wgp_write(uint32_t size, uint64_t value) {
 }
 
 uint64_t frames_presented() { return g_frames; }
+void request_trace_frame(uint64_t n) { g_trace_request = long(g_frames + (n ? n - 1 : 0)); }
 const Stats& stats() { return g_stats; }
 
 }  // namespace gcrecomp::gp
