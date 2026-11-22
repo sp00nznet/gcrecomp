@@ -103,6 +103,7 @@ if(GCRECOMP_BUILD_RUNTIME)
             src/gp/gl_renderer.cpp
             src/gp/input.cpp
             src/gp/efb_copy.cpp
+            src/gp/gp_decode.cpp
         )
         target_include_directories(gcrecomp_gp PUBLIC include)
         target_include_directories(gcrecomp_gp PRIVATE ${SDL3_INCLUDE_DIRS})
@@ -115,6 +116,14 @@ if(GCRECOMP_BUILD_RUNTIME)
             target_include_directories(gcrecomp_input_tests PRIVATE include src/gp ${SDL3_INCLUDE_DIRS})
             target_link_libraries(gcrecomp_input_tests PRIVATE gcrecomp_gp gcrecomp_runtime)
             add_test(NAME input COMMAND gcrecomp_input_tests)
+            add_executable(gp_decode_test tests/gp_decode_test.cpp)
+            target_include_directories(gp_decode_test PRIVATE src/gp)
+            target_link_libraries(gp_decode_test PRIVATE gcrecomp_gp)
+            add_test(NAME gp_decode_test COMMAND gp_decode_test)
+            # Needs a GL context: SDL_VIDEO_DRIVER=offscreen ./gp_render_check (not run by ctest).
+            add_executable(gp_render_check tests/gp_render_check.cpp)
+            target_include_directories(gp_render_check PRIVATE src/gp)
+            target_link_libraries(gp_render_check PRIVATE gcrecomp_gp gcrecomp_runtime)
         endif()
     else()
         message(STATUS "SDL3 not found: gcrecomp_gp (GP renderer) is not built")

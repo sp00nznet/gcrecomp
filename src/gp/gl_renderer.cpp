@@ -21,6 +21,7 @@
 #include "gcrecomp/gx/gx.h"
 #include "gcrecomp/runtime.h"
 #include "efb_copy.h"
+#include "gp_decode.h"
 #include "gp_internal.h"
 #include "input.h"
 
@@ -47,6 +48,11 @@ int g_shot_count = 0;
 GLuint g_fbo = 0, g_color = 0, g_depth = 0;
 GLuint g_vao = 0, g_vbo = 0, g_program = 0;
 GLuint g_white = 0;
+uint64_t g_indirect_draws = 0;
+// How often the game used the features that are only visible on screen, reported at shutdown.
+struct FeatureUse {
+    uint64_t c14x2_textures = 0, mip_textures = 0, fog_draws = 0, const_alpha_draws = 0, logic_op_draws = 0, early_z_passes = 0;
+} g_use;
 
 const char* kVertexShader = R"(#version 330 core
 layout(location = 0) in vec4 a_pos;
@@ -76,7 +82,8 @@ const char* kFragmentShader = R"(#version 330 core
 in vec4 v_c0;
 in vec4 v_c1;
 in vec3 v_uv[8];
-out vec4 o_color;
+layout(location = 0, index = 0) out vec4 o_color;
+layout(location = 0, index = 1) out vec4 o_src1;   // TEV alpha, for blend factors when a constant alpha replaces o_color.a
 
 uniform sampler2D u_tex0; uniform sampler2D u_tex1; uniform sampler2D u_tex2; uniform sampler2D u_tex3;
 uniform sampler2D u_tex4; uniform sampler2D u_tex5; uniform sampler2D u_tex6; uniform sampler2D u_tex7;
@@ -85,6 +92,10 @@ uniform uvec4 u_stage[16];   // color env, alpha env, tref (map | coord << 3 | e
 uniform ivec4 u_swap[4];     // component selectors r, g, b, a of each swap table
 uniform vec4 u_reg[4];       // PREV, C0, C1, C2
 uniform vec4 u_konst[4];
+uniform vec4 u_fog_f;        // x: A, y: C
+uniform ivec4 u_fog_i;       // x: B magnitude, y: B shift, z: orthographic, w: type (0 off, 2 linear, 4-7 exp)
+uniform vec3 u_fog_color;
+uniform float u_const_alpha; // alpha written to the EFB when >= 0 (GXSetDstAlpha), else the TEV alpha
 uniform uvec2 u_alpha_cmp;   // x: comparison codes (c0 | c1 << 3 | logic << 6), y: refs (ref0 | ref1 << 8)
 
 vec4 sample_map(int map, vec2 uv) {
@@ -140,6 +151,26 @@ bool compare(uint func, float a, float ref) {
     return true;
 }
 
+// Mirrors fog_factor in gp_decode.cpp.
+float fog_amount() {
+    int type = u_fog_i.w;
+    if (type == 0) return 0.0;
+    int z24 = int(gl_FragCoord.z * 16777215.0 + 0.5);
+    float ze;
+    if (u_fog_i.z != 0) {
+        ze = u_fog_f.x * float(z24) / 16777216.0;
+    } else {
+        int denom = u_fog_i.x - (z24 >> u_fog_i.y);
+        ze = denom != 0 ? u_fog_f.x * 16777216.0 / float(denom) : 1e30;
+    }
+    float f = clamp(ze - u_fog_f.y, 0.0, 1.0);
+    if (type == 4) return 1.0 - exp2(-8.0 * f);
+    if (type == 5) return 1.0 - exp2(-8.0 * f * f);
+    if (type == 6) return exp2(-8.0 * (1.0 - f));
+    if (type == 7) return exp2(-8.0 * (1.0 - f) * (1.0 - f));
+    return f;
+}
+
 void main() {
     vec4 reg[4] = vec4[4](u_reg[0], u_reg[1], u_reg[2], u_reg[3]);
     for (int i = 0; i < u_nstages; ++i) {
@@ -186,12 +217,15 @@ void main() {
         reg[adest].a = alpha;
     }
     vec4 result = vec4(reg[0].rgb, reg[0].a);
+    result.rgb = mix(result.rgb, u_fog_color, fog_amount());
 
     uint c0 = u_alpha_cmp.x & 7u, c1 = (u_alpha_cmp.x >> 3) & 7u, logic = (u_alpha_cmp.x >> 6) & 3u;
     float r0 = float(u_alpha_cmp.y & 255u) / 255.0, r1 = float((u_alpha_cmp.y >> 8) & 255u) / 255.0;
     bool p0 = compare(c0, result.a, r0), p1 = compare(c1, result.a, r1);
     bool pass = logic == 0u ? (p0 && p1) : logic == 1u ? (p0 || p1) : logic == 2u ? (p0 != p1) : (p0 == p1);
     if (!pass) discard;
+    o_src1 = vec4(vec3(result.a), result.a);
+    if (u_const_alpha >= 0.0) result.a = u_const_alpha;
     o_color = result;
 }
 )";
@@ -229,80 +263,36 @@ uint64_t hash_bytes(const uint8_t* p, size_t n) {
     return h;
 }
 
-// Bytes occupied by a texture in memory, including padding to whole tiles.
-size_t texture_bytes(uint32_t w, uint32_t h, uint32_t fmt) {
-    uint32_t bw, bh, bytes;
-    switch (fmt) {
-        case 0: case 8: case 14: bw = 8; bh = 8; bytes = 32; break;   // I4, C4, CMPR
-        case 1: case 2: case 9: bw = 8; bh = 4; bytes = 32; break;    // I8, IA4, C8
-        case 6: bw = 4; bh = 4; bytes = 64; break;                    // RGBA8
-        default: bw = 4; bh = 4; bytes = 32; break;                   // 16-bit formats
-    }
-    return size_t((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
-}
-
-// C4/C8: the indices use the I4/I8 tile layouts, so decode as intensity to recover them, then look
-// each one up in the palette loaded by BP 0x64/0x65.
-std::vector<uint8_t> decode_indexed(const State& s, const uint8_t* src, uint32_t w, uint32_t h, uint32_t fmt,
-                                    uint32_t settlut) {
-    const bool c4 = fmt == 8;
-    const std::vector<uint8_t> idx = gx::decode_texture(src, w, h, c4 ? gx::GX_TF_I4 : gx::GX_TF_I8);
-    const uint8_t* pal = s.tlut + (settlut & 0x3FF) * 512;
-    const uint32_t pal_fmt = (settlut >> 10) & 3;
-    std::vector<uint8_t> out(size_t(w) * h * 4);
-    for (size_t p = 0; p < size_t(w) * h; ++p) {
-        const uint32_t i = c4 ? idx[p * 4] / 17 : idx[p * 4];
-        const uint32_t e = (uint32_t(pal[2 * i]) << 8) | pal[2 * i + 1];
-        uint8_t r, g, b, a;
-        if (pal_fmt == 0) {  // IA8: alpha in the high byte, intensity in the low byte
-            a = uint8_t(e >> 8);
-            r = g = b = uint8_t(e);
-        } else if (pal_fmt == 1) {  // RGB565
-            r = uint8_t(((e >> 11) & 31) * 255 / 31);
-            g = uint8_t(((e >> 5) & 63) * 255 / 63);
-            b = uint8_t((e & 31) * 255 / 31);
-            a = 255;
-        } else if (e & 0x8000) {  // RGB5A3, opaque: RGB555
-            r = uint8_t(((e >> 10) & 31) * 255 / 31);
-            g = uint8_t(((e >> 5) & 31) * 255 / 31);
-            b = uint8_t((e & 31) * 255 / 31);
-            a = 255;
-        } else {  // RGB5A3, translucent: A3 R4 G4 B4
-            a = uint8_t(((e >> 12) & 7) * 255 / 7);
-            r = uint8_t(((e >> 8) & 15) * 17);
-            g = uint8_t(((e >> 4) & 15) * 17);
-            b = uint8_t((e & 15) * 17);
-        }
-        out[p * 4] = r;
-        out[p * 4 + 1] = g;
-        out[p * 4 + 2] = b;
-        out[p * 4 + 3] = a;
-    }
-    return out;
-}
-
 GLuint texture_for_map(const State& s, int map) {
     const uint32_t img0 = s.bp[map < 4 ? 0x88 + map : 0xA8 + (map - 4)];
     const uint32_t img3 = s.bp[map < 4 ? 0x94 + map : 0xB4 + (map - 4)];
     const uint32_t mode0 = s.bp[map < 4 ? 0x80 + map : 0xA0 + (map - 4)];
+    const uint32_t mode1 = s.bp[map < 4 ? 0x84 + map : 0xA4 + (map - 4)];
     const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 0xF;
     const uint32_t addr = (img3 & 0xFFFFFF) << 5;
-    if (fmt == 10) {  // C14X2 is not supported yet
-        glBindTexture(GL_TEXTURE_2D, g_white);
-        return g_white;
-    }
-
-    const bool indexed = fmt == 8 || fmt == 9;
+    const bool indexed = fmt == kTexC4 || fmt == kTexC8 || fmt == kTexC14X2;
     const uint32_t settlut = indexed ? s.bp[map < 4 ? 0x98 + map : 0xB8 + (map - 4)] : 0;
-    const size_t bytes = texture_bytes(w, h, fmt);
+    const uint32_t levels = mip_level_count(w, h, mode0, mode1);
+    const size_t bytes = mip_chain_bytes(w, h, fmt, levels);
     const uint8_t* src = g_mem.translate(addr);
-    const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt;
+    const uint64_t key = (uint64_t(addr) << 24) ^ (uint64_t(w) << 12) ^ (uint64_t(h) << 4) ^ fmt ^ (uint64_t(levels) << 56);
     uint64_t hash = hash_bytes(src, bytes);
-    if (indexed) hash ^= hash_bytes(s.tlut + (settlut & 0x3FF) * 512, fmt == 8 ? 32 : 512) * 31 + settlut;
+    if (indexed) {
+        // Hash the part of the TLUT the format can reach: 16, 256 or 16384 entries of 2 bytes.
+        const size_t entries = fmt == kTexC4 ? 16 : fmt == kTexC8 ? 256 : 16384;
+        const size_t base = size_t(settlut & 0x3FF) * 512;
+        const size_t len = std::min(entries * 2, sizeof(s.tlut) - base);
+        hash ^= hash_bytes(s.tlut + base, len) * 31 + settlut;
+    }
     CachedTexture& t = g_textures[key];
     if (t.id == 0 || t.hash != hash) {
-        std::vector<uint8_t> rgba = indexed ? decode_indexed(s, src, w, h, fmt, settlut)
-                                            : gx::decode_texture(src, w, h, gx::GXTexFmt(fmt));
+        auto decode_level = [&](uint32_t level) {
+            const uint32_t lw = mip_dim(w, level), lh = mip_dim(h, level);
+            const uint8_t* lsrc = src + mip_level_offset(w, h, fmt, level);
+            return indexed ? decode_indexed(s.tlut, sizeof(s.tlut), lsrc, lw, lh, fmt, settlut)
+                           : gx::decode_texture(lsrc, lw, lh, gx::GXTexFmt(fmt));
+        };
+        const std::vector<uint8_t> rgba = decode_level(0);
         if (const char* dir = std::getenv("GP_DUMP_TEX")) {
             static int dumped = 0;
             if (dumped < 24) {
@@ -325,6 +315,15 @@ GLuint texture_for_map(const State& s, int map) {
         glBindTexture(GL_TEXTURE_2D, t.id);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        for (uint32_t level = 1; level < levels; ++level) {
+            const std::vector<uint8_t> mip = decode_level(level);
+            glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, mip_dim(w, level), mip_dim(h, level), 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, mip.data());
+        }
+        if (fmt == kTexC14X2) ++g_use.c14x2_textures;
+        if (levels > 1) ++g_use.mip_textures;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, GLint(levels - 1));
         t.hash = hash;
     }
     glBindTexture(GL_TEXTURE_2D, t.id);
@@ -332,7 +331,12 @@ GLuint texture_for_map(const State& s, int map) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap[(mode0 & 3) % 3]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap[((mode0 >> 2) & 3) % 3]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (mode0 & 0x10) ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ((mode0 >> 5) & 7) >= 4 ? GL_LINEAR : GL_NEAREST);
+    static const GLint min_filters[6] = {GL_NEAREST, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
+                                         GL_LINEAR,  GL_LINEAR_MIPMAP_NEAREST,  GL_LINEAR_MIPMAP_LINEAR};
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filters[uint32_t(effective_min_filter(mode0, levels))]);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, lod_bias_of(mode0));
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, min_lod_of(mode1));
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, max_lod_of(mode1));
     return t.id;
 }
 
@@ -388,16 +392,35 @@ void apply_state(const State& s) {
     }
     glDepthMask((zmode & 0x10) ? GL_TRUE : GL_FALSE);
 
-    const uint32_t blend = s.bp[0x41];
-    if (blend & 1) {
+    const BlendState blend = decode_blend(s.bp[0x41], s.bp[0x42]);
+    // Constant alpha: o_color.a carries the constant, so the blend factors that use the source alpha read
+    // the TEV alpha from the second shader output, and the alpha channel is written as it comes.
+    const bool const_alpha = blend.const_alpha;
+    auto factor = [&](uint32_t f, bool is_src) {
+        if (const_alpha && f == 4) return GLenum(GL_SRC1_COLOR);
+        if (const_alpha && f == 5) return GLenum(GL_ONE_MINUS_SRC1_COLOR);
+        return blend_factor(f, is_src);
+    };
+    if (blend.blend) {
         glEnable(GL_BLEND);
-        glBlendFunc(blend_factor((blend >> 8) & 7, true), blend_factor((blend >> 5) & 7, false));
-        glBlendEquation((blend & 0x800) ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD);
+        const GLenum src = factor(blend.src_factor, true), dst = factor(blend.dst_factor, false);
+        if (const_alpha) glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO);
+        else glBlendFunc(src, dst);
+        const GLenum rgb_eq = blend.subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD;
+        glBlendEquationSeparate(rgb_eq, const_alpha ? GL_FUNC_ADD : rgb_eq);
     } else {
         glDisable(GL_BLEND);
     }
-    glColorMask((blend & 8) ? GL_TRUE : GL_FALSE, (blend & 8) ? GL_TRUE : GL_FALSE, (blend & 8) ? GL_TRUE : GL_FALSE,
-                (blend & 0x10) ? GL_TRUE : GL_FALSE);
+    if (const_alpha) ++g_use.const_alpha_draws;
+    if (blend.logic_op) {
+        ++g_use.logic_op_draws;
+        glEnable(GL_COLOR_LOGIC_OP);
+        glLogicOp(GL_CLEAR + blend.logic_mode);  // GX_LO_* follows the GL enum order
+    } else {
+        glDisable(GL_COLOR_LOGIC_OP);
+    }
+    glUniform1f(glGetUniformLocation(g_program, "u_const_alpha"), const_alpha ? float(blend.const_alpha_value) / 255.0f : -1.0f);
+    glColorMask(blend.color_update, blend.color_update, blend.color_update, blend.alpha_update);
 
     // TEV stages.
     const int nstages = int(((s.bp[0x00] >> 10) & 0xF) + 1);
@@ -434,6 +457,13 @@ void apply_state(const State& s) {
     const uint32_t refs = (ac & 0xFF) | (((ac >> 8) & 0xFF) << 8);
     glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), cmp, refs);
 
+    const FogParams fog = decode_fog(s.bp);
+    if (fog.type != kFogOff) ++g_use.fog_draws;
+    glUniform4f(glGetUniformLocation(g_program, "u_fog_f"), fog.a, fog.c, 0.0f, 0.0f);
+    glUniform4i(glGetUniformLocation(g_program, "u_fog_i"), GLint(fog.b_mag), GLint(fog.b_shift), fog.ortho ? 1 : 0,
+                GLint(fog.type));
+    glUniform3fv(glGetUniformLocation(g_program, "u_fog_color"), 1, fog.color);
+
     // Textures: bind the maps the stages use; the others get the white texture.
     bool used[8] = {};
     for (int i = 0; i < nstages; ++i)
@@ -446,6 +476,13 @@ void apply_state(const State& s) {
         std::snprintf(name, sizeof(name), "u_tex%d", m);
         set_uniform_1i(name, m);
     }
+}
+
+void print_feature_use() {
+    std::fprintf(stderr, "[GL] feature use: C14X2 textures %llu, mipmapped textures %llu, fog draws %llu, constant-alpha draws %llu, logic-op draws %llu, early-Z passes %llu\n",
+                 (unsigned long long)g_use.c14x2_textures, (unsigned long long)g_use.mip_textures, (unsigned long long)g_use.fog_draws,
+                 (unsigned long long)g_use.const_alpha_draws, (unsigned long long)g_use.logic_op_draws, (unsigned long long)g_use.early_z_passes);
+    if (g_indirect_draws) std::fprintf(stderr, "[GL] %llu draw(s) used indirect texturing (not implemented)\n", (unsigned long long)g_indirect_draws);
 }
 
 void write_screenshot() {
@@ -552,6 +589,7 @@ bool init(int window_w, int window_h, const char* screenshot_dir, int max_screen
 }
 
 void shutdown() {
+    print_feature_use();
     if (g_context) SDL_GL_DestroyContext(g_context);
     if (g_window) SDL_DestroyWindow(g_window);
     g_context = nullptr;
@@ -580,6 +618,21 @@ void draw(const DrawCall& call, const State& s) {
                          f[6], f[7], f[12], f[13], f[14]);
         }
         std::fprintf(stderr, "[GL]   tex0 img0=%06X img3=%06X mode0=%06X\n", s.bp[0x88], s.bp[0x94], s.bp[0x80]);
+    }
+    if (const uint32_t ind = indirect_tev_stages(s.bp)) {
+        // Indirect texturing is not implemented: the draw is rendered as if the stages were direct.
+        // Say which games need it, once per distinct configuration.
+        ++g_indirect_draws;
+        static uint32_t seen[8];
+        static int nseen = 0;
+        const uint32_t sig = ind ^ (((s.bp[0x00] >> 16) & 7) << 16);
+        bool known = false;
+        for (int i = 0; i < nseen; ++i) known |= seen[i] == sig;
+        if (!known && nseen < 8) {
+            seen[nseen++] = sig;
+            std::fprintf(stderr, "[GL] indirect texturing used (draw #%llu): %u indirect stage(s), TEV stages 0x%04X; not implemented, drawn as direct\n",
+                         (unsigned long long)calls, (s.bp[0x00] >> 16) & 7, ind);
+        }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
     apply_state(s);
@@ -630,6 +683,16 @@ void draw(const DrawCall& call, const State& s) {
         }
     }
     glDrawArrays(mode, 0, GLsizei(count));
+    if (early_z_writes_rejected_pixels(s.bp)) {
+        // Z compare before texturing: pixels the alpha test rejected still update depth. Replay the
+        // draw without color and without the alpha test; pixels that passed already wrote their depth
+        // and fail the depth test against themselves, the rejected ones write it now. apply_state
+        // restores the color mask and the alpha test uniform for the next draw.
+        ++g_use.early_z_passes;
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glUniform2ui(glGetUniformLocation(g_program, "u_alpha_cmp"), 7u | (7u << 3), 0u);
+        glDrawArrays(mode, 0, GLsizei(count));
+    }
 }
 
 // Copy a region of the EFB to main memory in the console's tiled layout (BP 0x52 with the XFB bit
@@ -675,6 +738,8 @@ void copy_efb(const CopyRequest& r, const State& s) {
                      r.w, r.h, s.bp[0x4D], s.bp[0x4E], g_window_w, g_window_h);
     }
     if (r.to_xfb) {
+        static uint64_t presented = 0;
+        if (++presented % 600 == 0 && std::getenv("GP_TRACE")) print_feature_use();
         // Blit the copied EFB region to the window and present.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);

@@ -1,0 +1,259 @@
+// SPDX-License-Identifier: MIT
+#include "gp_decode.h"
+
+#include <cmath>
+#include <cstring>
+
+#include "gcrecomp/gx/gx.h"
+
+namespace gcrecomp::gx {
+// Defined in src/gx/gx_texture.cpp.
+std::vector<uint8_t> decode_texture(const uint8_t* src, uint32_t width, uint32_t height, GXTexFmt fmt);
+}  // namespace gcrecomp::gx
+
+namespace gcrecomp::gp {
+
+size_t texture_bytes(uint32_t w, uint32_t h, uint32_t fmt) {
+    uint32_t bw, bh, bytes;
+    switch (fmt) {
+        case 0: case 8: case 14: bw = 8; bh = 8; bytes = 32; break;   // I4, C4, CMPR
+        case 1: case 2: case 9: bw = 8; bh = 4; bytes = 32; break;    // I8, IA4, C8
+        case 6: bw = 4; bh = 4; bytes = 64; break;                    // RGBA8
+        default: bw = 4; bh = 4; bytes = 32; break;                   // 16-bit formats, C14X2
+    }
+    return size_t((w + bw - 1) / bw) * ((h + bh - 1) / bh) * bytes;
+}
+
+void tlut_entry_to_rgba(uint32_t e, uint32_t pal_fmt, uint8_t out[4]) {
+    uint8_t r, g, b, a;
+    if (pal_fmt == 0) {  // IA8: alpha in the high byte, intensity in the low byte
+        a = uint8_t(e >> 8);
+        r = g = b = uint8_t(e);
+    } else if (pal_fmt == 1) {  // RGB565
+        r = uint8_t(((e >> 11) & 31) * 255 / 31);
+        g = uint8_t(((e >> 5) & 63) * 255 / 63);
+        b = uint8_t((e & 31) * 255 / 31);
+        a = 255;
+    } else if (e & 0x8000) {  // RGB5A3, opaque: RGB555
+        r = uint8_t(((e >> 10) & 31) * 255 / 31);
+        g = uint8_t(((e >> 5) & 31) * 255 / 31);
+        b = uint8_t((e & 31) * 255 / 31);
+        a = 255;
+    } else {  // RGB5A3, translucent: A3 R4 G4 B4
+        a = uint8_t(((e >> 12) & 7) * 255 / 7);
+        r = uint8_t(((e >> 8) & 15) * 17);
+        g = uint8_t(((e >> 4) & 15) * 17);
+        b = uint8_t((e & 15) * 17);
+    }
+    out[0] = r;
+    out[1] = g;
+    out[2] = b;
+    out[3] = a;
+}
+
+namespace {
+
+// C14X2 stores one 16-bit big-endian entry per texel in 4x4 tiles; the low 14 bits are the index.
+std::vector<uint16_t> read_c14x2_indices(const uint8_t* src, uint32_t w, uint32_t h) {
+    std::vector<uint16_t> idx(size_t(w) * h);
+    const uint32_t tiles_x = (w + 3) / 4, tiles_y = (h + 3) / 4;
+    for (uint32_t ty = 0; ty < tiles_y; ++ty) {
+        for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+            const uint8_t* tile = src + (size_t(ty) * tiles_x + tx) * 32;
+            for (uint32_t y = 0; y < 4; ++y) {
+                for (uint32_t x = 0; x < 4; ++x) {
+                    const uint32_t px = tx * 4 + x, py = ty * 4 + y;
+                    if (px < w && py < h)
+                        idx[size_t(py) * w + px] = uint16_t(((tile[(y * 4 + x) * 2] << 8) | tile[(y * 4 + x) * 2 + 1]) & 0x3FFF);
+                }
+            }
+        }
+    }
+    return idx;
+}
+
+}  // namespace
+
+std::vector<uint8_t> decode_indexed(const uint8_t* tlut, size_t tlut_size, const uint8_t* src, uint32_t w,
+                                    uint32_t h, uint32_t fmt, uint32_t settlut) {
+    const size_t texels = size_t(w) * h;
+    std::vector<uint16_t> idx(texels);
+    if (fmt == kTexC14X2) {
+        idx = read_c14x2_indices(src, w, h);
+    } else {
+        // C4 and C8 use the I4 and I8 tile layouts: decode as intensity to recover the indices.
+        const bool c4 = fmt == kTexC4;
+        const std::vector<uint8_t> raw = gx::decode_texture(src, w, h, c4 ? gx::GX_TF_I4 : gx::GX_TF_I8);
+        for (size_t p = 0; p < texels; ++p) idx[p] = c4 ? raw[p * 4] / 17 : raw[p * 4];
+    }
+
+    const size_t base = size_t(settlut & 0x3FF) * 512;
+    const uint32_t pal_fmt = (settlut >> 10) & 3;
+    std::vector<uint8_t> out(texels * 4, 0);
+    for (size_t p = 0; p < texels; ++p) {
+        const size_t off = base + size_t(idx[p]) * 2;
+        if (off + 2 > tlut_size) continue;
+        tlut_entry_to_rgba(uint32_t(tlut[off] << 8) | tlut[off + 1], pal_fmt, &out[p * 4]);
+    }
+    return out;
+}
+
+MinFilter min_filter_of(uint32_t mode0) {
+    switch ((mode0 >> 5) & 7) {
+        case 1: return MinFilter::NearestMipNearest;
+        case 2: return MinFilter::NearestMipLinear;
+        case 4: case 7: return MinFilter::Linear;
+        case 5: return MinFilter::LinearMipNearest;
+        case 6: return MinFilter::LinearMipLinear;
+        default: return MinFilter::Nearest;
+    }
+}
+
+uint32_t mip_level_count(uint32_t w, uint32_t h, uint32_t mode0, uint32_t mode1) {
+    const MinFilter f = min_filter_of(mode0);
+    if (f == MinFilter::Nearest || f == MinFilter::Linear) return 1;
+    uint32_t max_levels = 1;
+    for (uint32_t d = w > h ? w : h; d > 1; d >>= 1) ++max_levels;
+    const uint32_t max_lod = (mode1 >> 8) & 0xFF;               // 4.4 fixed point
+    const uint32_t wanted = (max_lod + 15) / 16 + 1;           // round the fraction up
+    return wanted < max_levels ? wanted : max_levels;
+}
+
+MinFilter effective_min_filter(uint32_t mode0, uint32_t levels) {
+    const MinFilter f = min_filter_of(mode0);
+    if (levels > 1) return f;
+    return (f == MinFilter::Nearest || f == MinFilter::NearestMipNearest || f == MinFilter::NearestMipLinear)
+               ? MinFilter::Nearest
+               : MinFilter::Linear;
+}
+
+size_t mip_level_offset(uint32_t w, uint32_t h, uint32_t fmt, uint32_t level) {
+    size_t off = 0;
+    for (uint32_t l = 0; l < level; ++l) off += texture_bytes(mip_dim(w, l), mip_dim(h, l), fmt);
+    return off;
+}
+
+size_t mip_chain_bytes(uint32_t w, uint32_t h, uint32_t fmt, uint32_t levels) {
+    return mip_level_offset(w, h, fmt, levels);
+}
+
+float lod_bias_of(uint32_t mode0) { return float(int8_t((mode0 >> 9) & 0xFF)) / 32.0f; }
+
+namespace {
+// A and C of the fog registers: the top 20 bits of an IEEE-754 single.
+float fog_float(uint32_t field) {
+    const uint32_t bits = (field & 0xFFFFF) << 12;
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+}  // namespace
+
+FogParams decode_fog(const uint32_t* bp) {
+    FogParams p;
+    p.a = fog_float(bp[0xEE]);
+    p.b_mag = bp[0xEF] & 0xFFFFFF;
+    p.b_shift = bp[0xF0] & 0x1F;
+    p.c = fog_float(bp[0xF1]);
+    p.ortho = (bp[0xF1] >> 20) & 1;
+    p.type = (bp[0xF1] >> 21) & 7;
+    p.color[0] = float((bp[0xF2] >> 16) & 0xFF) / 255.0f;
+    p.color[1] = float((bp[0xF2] >> 8) & 0xFF) / 255.0f;
+    p.color[2] = float(bp[0xF2] & 0xFF) / 255.0f;
+    return p;
+}
+
+float fog_factor(const FogParams& p, uint32_t z24) {
+    if (p.type == kFogOff) return 0.0f;
+    float ze;
+    if (p.ortho) {
+        ze = p.a * float(z24) / 16777216.0f;
+    } else {
+        // ze = A / (B - (Zs >> B_SHIFT)), with A scaled by 2^24 for the integer depth.
+        const int32_t denom = int32_t(p.b_mag) - int32_t(z24 >> p.b_shift);
+        ze = denom != 0 ? p.a * 16777216.0f / float(denom) : 1e30f;
+    }
+    float f = ze - p.c;
+    f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+    switch (p.type) {
+        case kFogExp: return 1.0f - std::exp2(-8.0f * f);
+        case kFogExp2: return 1.0f - std::exp2(-8.0f * f * f);
+        case kFogBackwardsExp: return std::exp2(-8.0f * (1.0f - f));
+        case kFogBackwardsExp2: f = 1.0f - f; return std::exp2(-8.0f * f * f);
+        default: return f;  // linear
+    }
+}
+
+uint32_t indirect_tev_stages(const uint32_t* bp) {
+    if (((bp[0x00] >> 16) & 7) == 0) return 0;
+    const uint32_t nstages = ((bp[0x00] >> 10) & 0xF) + 1;
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < nstages; ++i)
+        if (bp[0x10 + i] & 0x1FFFFF) mask |= 1u << i;
+    return mask;
+}
+
+namespace {
+enum class Tri { Never, Always, Unknown };
+
+// What one alpha comparison (0 never, 1 <, 2 ==, 3 <=, 4 >, 5 !=, 6 >=, 7 always) does for every alpha
+// value 0..255 against `ref`.
+Tri alpha_compare_result(uint32_t func, uint32_t ref) {
+    switch (func) {
+        case 0: return Tri::Never;
+        case 1: return ref == 0 ? Tri::Never : Tri::Unknown;
+        case 3: return ref == 255 ? Tri::Always : Tri::Unknown;
+        case 4: return ref == 255 ? Tri::Never : Tri::Unknown;
+        case 6: return ref == 0 ? Tri::Always : Tri::Unknown;
+        case 7: return Tri::Always;
+        default: return Tri::Unknown;
+    }
+}
+}  // namespace
+
+bool alpha_test_can_reject(uint32_t ac) {
+    const Tri a = alpha_compare_result((ac >> 16) & 7, ac & 0xFF);
+    const Tri b = alpha_compare_result((ac >> 19) & 7, (ac >> 8) & 0xFF);
+    Tri r = Tri::Unknown;
+    switch ((ac >> 22) & 3) {
+        case 0:  // AND
+            if (a == Tri::Never || b == Tri::Never) r = Tri::Never;
+            else if (a == Tri::Always && b == Tri::Always) r = Tri::Always;
+            break;
+        case 1:  // OR
+            if (a == Tri::Always || b == Tri::Always) r = Tri::Always;
+            else if (a == Tri::Never && b == Tri::Never) r = Tri::Never;
+            break;
+        default:  // XOR (2), XNOR (3)
+            if (a != Tri::Unknown && b != Tri::Unknown) {
+                const bool same = a == b;
+                r = ((((ac >> 22) & 3) == 3) == same) ? Tri::Always : Tri::Never;
+            }
+            break;
+    }
+    return r != Tri::Always;
+}
+
+bool early_z_writes_rejected_pixels(const uint32_t* bp) {
+    const bool early = (bp[0x43] >> 6) & 1;
+    const bool depth_test = bp[0x40] & 1, depth_write = (bp[0x40] >> 4) & 1;
+    return early && depth_test && depth_write && alpha_test_can_reject(bp[0xF3]);
+}
+
+BlendState decode_blend(uint32_t cmode0, uint32_t cmode1) {
+    BlendState b;
+    b.blend = cmode0 & 1;
+    b.subtract = (cmode0 >> 11) & 1;
+    b.logic_mode = (cmode0 >> 12) & 15;
+    // The hardware ignores the logic op while blending is on; the copy op is a plain write.
+    b.logic_op = ((cmode0 >> 1) & 1) && !b.blend && b.logic_mode != 3;
+    b.color_update = (cmode0 >> 3) & 1;
+    b.alpha_update = (cmode0 >> 4) & 1;
+    b.dst_factor = (cmode0 >> 5) & 7;
+    b.src_factor = (cmode0 >> 8) & 7;
+    b.const_alpha = (cmode1 >> 8) & 1;
+    b.const_alpha_value = uint8_t(cmode1);
+    return b;
+}
+
+}  // namespace gcrecomp::gp
