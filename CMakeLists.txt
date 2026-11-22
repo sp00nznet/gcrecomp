@@ -92,6 +92,8 @@ if(GCRECOMP_BUILD_RUNTIME)
         src/audio/audio_mixer.cpp
         src/audio/audio_system.cpp
         src/audio/audio_sink.cpp
+        src/audio/wav_sink.cpp
+        src/audio/ax_hle.cpp
         src/audio/audio_interface.cpp
         src/audio/sdl_sink.cpp
     )
@@ -220,6 +222,9 @@ if(GCRECOMP_BUILD_TESTS AND GCRECOMP_BUILD_RUNTIME)
     add_executable(gcrecomp_dsp_tests tests/dsp_tests.cpp)
     target_link_libraries(gcrecomp_dsp_tests PRIVATE gcrecomp_runtime)
     add_test(NAME dsp COMMAND gcrecomp_dsp_tests)
+    add_executable(gcrecomp_ax_tests tests/ax_tests.cpp)
+    target_link_libraries(gcrecomp_ax_tests PRIVATE gcrecomp_audio)
+    add_test(NAME ax COMMAND gcrecomp_ax_tests)
 endif()
 
 # ===========================================================================

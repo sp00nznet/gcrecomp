@@ -6,8 +6,8 @@
 // There is no DSP core. The mask ROM's boot protocol is answered directly: after a reset the
 // ROM announces itself (0x8071FEED), takes the boot task's command mails, and when told to start
 // the uploaded microcode it reports DSP_INIT (0xDCD10000) with a DSP interrupt. From then on the
-// microcode belongs to the game and nothing answers its mails: they stay pending in the CPU->DSP
-// mailbox, exactly as on a DSP that does not read them.
+// microcode belongs to the game: its mails are handed to the AX microcode HLE (audio/ax.h), which
+// renders the command lists the CPU sends into main memory and answers DSP_YIELD with an interrupt.
 //
 // The model follows the register layout used by the SDK (dolphin/dsp.h):
 //   +0x00/+0x02  CPU->DSP mailbox, high/low (bit 15 of the high half reads as: mail pending)
@@ -21,6 +21,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "gcrecomp/audio/ax.h"
 
 namespace gcrecomp {
 
@@ -79,6 +81,8 @@ public:
     // Boot task fields the ROM collected: command tag low half -> data mail.
     struct BootField { uint16_t tag; uint32_t data; };
     const std::vector<BootField>& boot_fields() const { return boot_fields_; }
+    // The AX microcode model that answers the game's mails once the ROM is done.
+    const audio::AxUcode& ax() const { return ax_; }
 
     // Mail and control traces on stderr. The global device reads DSP_TRACE (non-empty, not "0").
     void set_trace(bool on) { trace_ = on; }
@@ -88,7 +92,8 @@ private:
     uint32_t raw_read(uint32_t offset, uint32_t size) const;
     void raw_write(uint32_t offset, uint32_t value, uint32_t size);
     void write_control(uint16_t value);
-    void mail_from_cpu(uint32_t mail);
+    void mail_from_cpu(uint32_t mail, uint8_t* ram, size_t ram_size);
+    void axucode_mail(uint32_t mail, uint8_t* ram, size_t ram_size);
     void aram_dma(uint8_t* ram, size_t ram_size);
 
     uint8_t regs_[kSize] = {};
@@ -101,6 +106,7 @@ private:
     bool init_code_loaded_ = false;  // the SDK's init code was DMA'd in since the last reset
     uint16_t expect_data_for_ = 0;  // command tag whose data mail comes next (0: none)
     std::vector<BootField> boot_fields_;
+    audio::AxUcode ax_;  // the game's microcode, once the boot task started it
     bool trace_ = false;
 };
 

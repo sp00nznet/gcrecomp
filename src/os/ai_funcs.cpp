@@ -9,7 +9,8 @@
 //
 // Interrupts do not preempt recompiled code here, so the callback runs at the points where the
 // game could have been interrupted: when it re-enables interrupts, waits for a retrace or reads
-// the clock (see ai_poll). GCRECOMP_AUDIO=null selects the null sink.
+// the clock (see ai_poll). GCRECOMP_AUDIO=null selects the null sink,
+// GCRECOMP_DUMP_AUDIO=file.wav dumps the output to a WAV file.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 
 #include "gcrecomp/audio/audio_interface.h"
 #include "gcrecomp/runtime.h"
+#include "gcrecomp/threads.h"
 
 namespace gcrecomp {
 
@@ -46,8 +48,10 @@ AiState g_ai;
 void run_callback() {
     if (!g_ai.callback || !g_ai.ctx) return;
     PPCContext saved = *g_ai.ctx;
+    const bool was_enabled = sched::interrupts_exchange(false);  // as in an interrupt handler
     g_func_table.call(g_ai.callback, g_ai.ctx, g_ai.mem);
     *g_ai.ctx = saved;
+    sched::interrupts_exchange(was_enabled);
 }
 
 const uint8_t* read_guest(Memory* mem, uint32_t address, uint32_t bytes) {
@@ -68,6 +72,12 @@ void ensure_ai(Memory* mem) {
             std::printf("[AI] %s: audio is discarded\n", want_null ? "null sink selected" : "no audio device");
             g_ai.owned_sink = std::make_unique<audio::NullSink>(true);
             g_ai.owned_sink->open(32000);
+        }
+        // GCRECOMP_DUMP_AUDIO=file.wav also writes everything played to a WAV file.
+        const char* dump = std::getenv("GCRECOMP_DUMP_AUDIO");
+        if (dump && *dump) {
+            g_ai.owned_sink = audio::make_wav_dump_sink(std::move(g_ai.owned_sink), dump);
+            std::printf("[AI] dumping audio to %s\n", dump);
         }
         g_ai.sink = g_ai.owned_sink.get();
     }

@@ -50,8 +50,8 @@ static void guest_callback(PPCContext* ctx, Memory*) {
 
 static void fill(uint32_t address, int16_t left, int16_t right) {
     for (uint32_t i = 0; i < 160; ++i) {
-        g_mem.write16(address + i * 4, uint16_t(left));
-        g_mem.write16(address + i * 4 + 2, uint16_t(right));
+        g_mem.write16(address + i * 4, uint16_t(right));  // the AI reads the right word first
+        g_mem.write16(address + i * 4 + 2, uint16_t(left));
     }
 }
 

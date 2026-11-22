@@ -24,6 +24,7 @@
 #include "gcrecomp/runtime.h"
 #include "gcrecomp/interrupts.h"
 #include "gcrecomp/hw/dsp.h"
+#include "gcrecomp/threads.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -74,6 +75,8 @@ uint8_t* Memory::translate(uint32_t addr) {
     // g_ctx directly (see recomp_common.h's using-declarations).
     if ((op_count & 0x3FFFF) == 0) {
         // A game spinning on a flag its DSP interrupt handler sets never reaches an OS safe point.
+        // The same goes for the audio DMA callback that renders the next AX frame.
+        if (sched::interrupts_enabled()) ai_poll(&g_ctx, this);
         dsp_poll(&g_ctx, this);
         g_interrupts.tick(&g_ctx, this);
     }

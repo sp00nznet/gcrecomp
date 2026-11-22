@@ -87,18 +87,34 @@ void test_init_mail_value() {
     CHECK(d.read(0x06, 2) == 0x0000);
 }
 
-void test_ucode_mails_stay_pending() {
+void test_ucode_runs_ax_command_lists() {
     DspInterface d;
     w16(d, 0x0A, DspInterface::CR_RESET);
     take(d);
     send(d, 0x80F3D001); send(d, 0x10);
     take(d);
-    send(d, 0xBABE0038);              // bit 15 of the high half is data, not the flag
-    CHECK(d.read(0x00, 2) & 0x8000);  // nobody read it: pending
-    CHECK(d.read(0x02, 2) == 0x0038);
+    // The game's microcode takes every mail at once; bit 15 of the high half is data, not the flag.
+    send(d, 0xBABE0001);
+    CHECK((d.read(0x00, 2) & 0x8000) == 0);
+    CHECK(d.read(0x02, 2) == 0x0001);
     CHECK((d.read(0x00, 2) & 0x7FFF) == 0x3ABE);
-    send(d, 0x12345678);
-    CHECK(d.read(0x00, 2) == (0x1234 | 0x8000));
+    CHECK((d.read(0x04, 2) & 0x8000) == 0);  // no answer before the list address
+    // A list at 0x1000 that ends at once: the microcode answers DSP_YIELD with an interrupt.
+    g_ram[0x1000] = 0x00;
+    g_ram[0x1001] = 0x0F;
+    send(d, 0x00001000);
+    CHECK(d.ax().frames() == 1);
+    CHECK(take(d) == (0xDCD10002u | DspInterface::kMailValid));
+    CHECK(d.control() & DspInterface::CR_DSPINT);
+    // The task manager's "continue" returns it to waiting for a list; a RESET mail hands the DSP back.
+    send(d, 0xCDD10003);
+    CHECK(!d.rom_running());
+    send(d, 0xBABE0001);
+    send(d, 0x00001000);
+    CHECK(d.ax().frames() == 2);
+    take(d);
+    send(d, 0xCDD10002);
+    CHECK(d.rom_running());
 }
 
 void test_control_w1c_and_masks() {
@@ -205,7 +221,7 @@ int main() {
     test_mail_to_dsp_consumed_by_rom();
     test_boot_protocol_and_init();
     test_init_mail_value();
-    test_ucode_mails_stay_pending();
+    test_ucode_runs_ax_command_lists();
     test_control_w1c_and_masks();
     test_aram_dma();
     test_registers_and_ar_mode();

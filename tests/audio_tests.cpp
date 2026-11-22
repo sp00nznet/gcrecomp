@@ -22,14 +22,14 @@ static int g_failures = 0;
 // --- sample conversion ---------------------------------------------------------------------------
 
 static void test_convert_ai_frames() {
-    // L0 R0 L1 R1 as the AI reads them: big-endian.
+    // R0 L0 R1 L1 as the AI reads them: big-endian, right word first.
     const uint8_t in[] = {0x01, 0x02, 0xFF, 0xFE, 0x7F, 0xFF, 0x80, 0x00};
     int16_t out[4] = {};
     convert_ai_frames(in, out, 2);
-    CHECK(out[0] == 0x0102);
-    CHECK(out[1] == -2);
-    CHECK(out[2] == 32767);
-    CHECK(out[3] == -32768);
+    CHECK(out[0] == -2);        // L0
+    CHECK(out[1] == 0x0102);    // R0
+    CHECK(out[2] == -32768);    // L1
+    CHECK(out[3] == 32767);     // R1
 }
 
 static void test_sample_rate_ids() {
@@ -152,14 +152,15 @@ struct Harness {
         ai.set_lead_ms(20);  // 640 frames at 32 kHz = four blocks of 160 frames
     }
 
-    // Fills `frames` stereo frames at `address` with left = tag, right = -tag (big-endian).
+    // Fills `frames` stereo frames at `address` with left = tag, right = -tag (big-endian, the AI
+    // reads the right word first).
     void fill(uint32_t address, uint32_t frames, int16_t tag) {
         for (uint32_t i = 0; i < frames; ++i) {
             const uint16_t l = uint16_t(tag), r = uint16_t(-tag);
-            ram[address + i * 4 + 0] = uint8_t(l >> 8);
-            ram[address + i * 4 + 1] = uint8_t(l);
-            ram[address + i * 4 + 2] = uint8_t(r >> 8);
-            ram[address + i * 4 + 3] = uint8_t(r);
+            ram[address + i * 4 + 0] = uint8_t(r >> 8);
+            ram[address + i * 4 + 1] = uint8_t(r);
+            ram[address + i * 4 + 2] = uint8_t(l >> 8);
+            ram[address + i * 4 + 3] = uint8_t(l);
         }
     }
 };

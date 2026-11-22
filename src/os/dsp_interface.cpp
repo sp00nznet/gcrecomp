@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include "gcrecomp/interrupts.h"
 #include "gcrecomp/runtime.h"
@@ -58,6 +59,7 @@ void DspInterface::reset() {
     init_code_loaded_ = false;
     expect_data_for_ = 0;
     boot_fields_.clear();
+    ax_ = audio::AxUcode();
 }
 
 bool DspInterface::dsp_interrupt_pending() const {
@@ -126,7 +128,7 @@ void DspInterface::write(uint32_t offset, uint32_t value, uint32_t size, uint8_t
             return;
         case kMailToDspLo:
             to_dsp_ = (to_dsp_ & 0xFFFF0000) | (value & 0xFFFF);
-            mail_from_cpu(to_dsp_);
+            mail_from_cpu(to_dsp_, ram, ram_size);
             return;
         case kArDmaCountLo:
             // The SDK writes the count as two halves; the low one starts the transfer.
@@ -165,12 +167,14 @@ void DspInterface::write_control(uint16_t v) {
     }
 }
 
-void DspInterface::mail_from_cpu(uint32_t mail) {
+void DspInterface::mail_from_cpu(uint32_t mail, uint8_t* ram, size_t ram_size) {
     // The mail as the DSP reads it: the high half's bit 15 is what the CPU wrote, not the pending flag.
-    if (trace_) std::fprintf(stderr, "[dsp] cpu sends mail %08X%s\n", mail, rom_running_ ? " (rom)" : " (ucode, unanswered)");
+    if (trace_) std::fprintf(stderr, "[dsp] cpu sends mail %08X%s\n", mail, rom_running_ ? " (rom)" : " (ucode)");
     if (!rom_running_) {
-        // The game's microcode would read it; there is none, so it stays pending.
-        to_pending_ = true;
+        // The game's microcode takes every mail at once (the CPU polls the pending flag before the
+        // next one) and may answer with a mail and a DSP interrupt.
+        to_pending_ = false;
+        axucode_mail(mail, ram, ram_size);
         return;
     }
     // The ROM takes every mail at once: the pending flag never stays set.
@@ -183,6 +187,7 @@ void DspInterface::mail_from_cpu(uint32_t mail) {
         if (tag == kBootStart) {
             // The uploaded microcode starts and reports in with an interrupt.
             rom_running_ = false;
+            ax_ = audio::AxUcode();
             from_dsp_ = kDspInitMail | kMailValid;
             control_ |= CR_DSPINT;
             if (trace_) std::fprintf(stderr, "[dsp] ucode starts at %04X: DSP_INIT + interrupt\n", mail & 0xFFFF);
@@ -190,6 +195,33 @@ void DspInterface::mail_from_cpu(uint32_t mail) {
         return;
     }
     if ((mail & kBootTagMask) == kBootTag) expect_data_for_ = uint16_t(mail);
+}
+
+void DspInterface::axucode_mail(uint32_t mail, uint8_t* ram, size_t ram_size) {
+    audio::AxMemory mem;
+    mem.ram = ram;
+    mem.ram_size = ram ? ram_size : 0;
+    mem.aram = aram_.data();
+    mem.aram_size = aram_.size();
+    const std::optional<uint32_t> reply = ax_.handle_mail(mail, mem);
+    if (reply) {
+        post_mail_to_cpu(*reply);
+        control_ |= CR_DSPINT;
+        if (trace_) std::fprintf(stderr, "[dsp] ucode answers %08X + interrupt (list %llu)\n", *reply,
+                                 (unsigned long long)ax_.frames());
+    }
+    if (trace_ && reply && *reply == audio::AxUcode::kDspYield && ax_.frames() % 500 == 1) {
+        std::fprintf(stderr, "[dsp] ax list %llu (%zu words):", (unsigned long long)ax_.frames(), ax_.last_cmdlist_size());
+        for (size_t i = 0; i < ax_.last_cmdlist_size() && i < 64; ++i) std::fprintf(stderr, " %04X", ax_.last_cmdlist()[i]);
+        std::fprintf(stderr, "\n");
+    }
+    if (ax_.reset_requested()) {
+        // The CPU hands the DSP back to the ROM: the next boot task upload starts a new microcode.
+        rom_running_ = true;
+        expect_data_for_ = 0;
+        boot_fields_.clear();
+        ax_ = audio::AxUcode();
+    }
 }
 
 void DspInterface::aram_dma(uint8_t* ram, size_t ram_size) {
@@ -222,10 +254,15 @@ void deliver(int id, PPCContext* ctx, Memory* mem) {
     if (!handler) return;
     // The handler runs as an exception would: all registers are the interrupted code's.
     PPCContext saved = *ctx;
+    // An interrupt handler runs with interrupts masked, and the interrupted code gets its own state
+    // back afterwards (the handler's OSDisableInterrupts/OSRestoreInterrupts pairs are not balanced
+    // against the exception return that real hardware performs).
+    const bool was_enabled = sched::interrupts_exchange(false);
     ctx->r[3] = uint32_t(id);
     ctx->r[4] = mem->read32(0x800000D4);  // the interrupted context (OSGetCurrentContext)
     g_func_table.call(handler, ctx, mem);
     *ctx = saved;
+    sched::interrupts_exchange(was_enabled);
 }
 }  // namespace
 

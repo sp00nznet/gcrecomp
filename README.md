@@ -227,20 +227,32 @@ GameCube audio uses a custom DSP with ADPCM compression:
   big-endian PCM16 the game programs are converted and played through an `AudioSink`
   (SDL3, or a null sink with `GCRECOMP_AUDIO=null`), and the game's DMA callback runs when a
   block starts, where the game could have been interrupted (re-enabling interrupts, retrace
-  wait, clock read). `AIRegisterDMACallback` must be named in the game's symbol map. The DSP
-  (AX, or a game's own microcode) is not emulated. Tests: `ctest --test-dir build`.
+  wait, clock read, every 256K memory operations); the handler runs with interrupts masked and the
+  interrupted code gets its interrupt state back. `AIRegisterDMACallback` must be named in the
+  game's symbol map. The AI plays the first 16-bit word of a frame as the right channel. The AX
+  microcode fills the blocks (see below). `GCRECOMP_DUMP_AUDIO=file.wav` also writes everything
+  played to a 16-bit stereo WAV file (valid after every block), to check the output without
+  listening. Tests: `ctest --test-dir build`.
+- **AX microcode HLE** (`src/audio/ax_hle.cpp`, `audio/ax.h`): the SDK's AX voice mixer runs on
+  the DSP; the CPU sends `0xBABE0000|size` and the address of a command list per 5 ms frame. The
+  command list (voice parameter blocks, ADPCM/PCM8/PCM16 decoding from ARAM, resampling, volume
+  envelope and ramps, aux buses, compressor, output) is executed on main memory and ARAM, and the
+  microcode answers `DSP_YIELD` (`0xDCD10002`) with a DSP interrupt. Ported from the author's own
+  Rust implementation (fepor-recomp), which follows Dolphin's DSP HLE; the resampler's polyphase
+  table is regenerated, not the ROM dump. Only the AX command list is modelled: a game whose own
+  microcode is something else is not (unknown commands are counted and end the list).
 - **DSP interface** (`src/os/dsp_interface.cpp`, `hw/dsp.h`): the registers at
   `0xCC005000..0xCC00503F` are a device (`g_dsp`), not stored bytes: CPU->DSP and DSP->CPU
   mailboxes (valid flag in bit 15, reading the low half consumes), the control register (reset,
   halt, write-1-to-clear interrupt flags and masks), the ARAM DMA registers (16 MiB ARAM, shared
   with the `AR*` replacements). The mask ROM's boot protocol is answered (`0x8071FEED` after
   reset, boot-task command mails, `DSP_INIT` `0xDCD10000` plus a DSP interrupt when the uploaded
-  microcode starts). From then on nothing answers: a game's own microcode needs a DSP core or a
-  microcode HLE, and its mails stay pending. The DSP interrupt is delivered to the handler the
+  microcode starts). From then on the mails go to the AX microcode HLE, which takes each at once.
+  The DSP interrupt is delivered to the handler the
   game registered with `__OSSetInterruptHandler` (replaced: `__OSSetInterruptHandler` must be
   named in the symbol map; so must `OSDisableInterrupts`/`OSEnableInterrupts`, otherwise the
   recompiled `mfmsr`/`mtmsr` no-ops leave the guest's interrupt state wrong), at the OS safe
-  points and every 256K memory operations. `DSP_TRACE=1` logs mails and control writes on stderr.
+  points and every 256K memory operations. `DSP_TRACE=1` logs mails, control writes and every 500th AX command list on stderr.
 
 ### Input (`src/input/`)
 

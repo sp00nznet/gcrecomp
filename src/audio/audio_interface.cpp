@@ -11,8 +11,12 @@ constexpr uint32_t kMaxBlocksPerPoll = 64;
 }  // namespace
 
 void convert_ai_frames(const uint8_t* big_endian, int16_t* out, size_t frames) {
-    for (size_t i = 0; i < frames * 2; ++i)
-        out[i] = int16_t(uint16_t(big_endian[2 * i] << 8) | big_endian[2 * i + 1]);
+    // The AI plays the first 16-bit word of each frame as the right channel, the second as the left.
+    for (size_t i = 0; i < frames; ++i) {
+        const uint8_t* f = big_endian + 4 * i;
+        out[2 * i] = int16_t(uint16_t(f[2] << 8) | f[3]);
+        out[2 * i + 1] = int16_t(uint16_t(f[0] << 8) | f[1]);
+    }
 }
 
 uint32_t ai_sample_rate_hz(uint32_t rate_id) { return rate_id == 0 ? 32000 : 48000; }

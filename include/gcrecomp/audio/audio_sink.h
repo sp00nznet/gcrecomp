@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace gcrecomp::audio {
@@ -66,6 +67,12 @@ private:
     std::vector<int16_t> recorded_;
     std::vector<uint32_t> submit_rates_;
 };
+
+/// Wraps `inner` so that everything submitted is also written to `path` as a 16-bit stereo WAV
+/// file (one rate for the whole file: the rate at the first submit). The header is kept valid
+/// after every block, so a killed process leaves a playable file. Returns `inner` unchanged when
+/// the file cannot be created.
+std::unique_ptr<AudioSink> make_wav_dump_sink(std::unique_ptr<AudioSink> inner, const std::string& path);
 
 /// SDL3 sink (default playback device, SDL does the resampling to the device rate). Returns
 /// nullptr when the library was built without SDL3.

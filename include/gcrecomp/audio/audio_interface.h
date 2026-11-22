@@ -18,8 +18,8 @@
 
 namespace gcrecomp::audio {
 
-/// Converts `frames` stereo frames of big-endian int16 (as the AI reads them from RAM) to
-/// host-endian int16.
+/// Converts `frames` stereo frames of big-endian int16 (as the AI reads them from RAM: right word
+/// first, left word second) to host-endian interleaved L, R.
 void convert_ai_frames(const uint8_t* big_endian, int16_t* out, size_t frames);
 
 /// Sample rate of the AI DMA as the SDK's AISetDSPSampleRate numbers it: 0 = 32 kHz, 1 = 48 kHz.
